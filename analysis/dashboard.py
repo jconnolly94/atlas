@@ -312,6 +312,10 @@ def overview_layout():
 def geographic_layout():
     """Layout for the Geographic View tab"""
     return html.Div([
+        dcc.Store(id='base-geo-map', storage_type='memory'),
+        dcc.Store(id='base-network-map', storage_type='memory'),
+        dcc.Store(id='node-data-lookup', storage_type='memory'),
+
         # Filters for Geographic View
         html.Div([
             html.Div([
@@ -358,7 +362,21 @@ def geographic_layout():
                 html.Div([
                     html.Button("Play", id="geo-play-button", className="play-button"),
                     html.Div(id="geo-timestep-display", className="timestep-display")
-                ], className="playback-controls")
+                ], className="playback-controls"),
+
+                # View toggle
+                html.Div([
+                    html.Label("View Type:"),
+                    dcc.RadioItems(
+                        id='view-type-toggle',
+                        options=[
+                            {'label': 'Geographic Map', 'value': 'geo'},
+                            {'label': 'Network View', 'value': 'network'}
+                        ],
+                        value='geo',
+                        className="view-toggle"
+                    )
+                ], className="filter-item")
             ], className="tab-header-right")
         ], className="tab-header geo-header"),
 
@@ -798,7 +816,7 @@ def create_learning_improvement_chart(learning_df):
 
 
 def create_traffic_map(data):
-    """Create geographic traffic map"""
+    """Create geographic traffic map with improved performance."""
     # Check if lat/lon coordinates are available
     has_geo = all(('lat' in node and 'lon' in node and node['lat'] is not None and node['lon'] is not None)
                   for node in data['nodes'])
@@ -818,34 +836,36 @@ def create_traffic_map(data):
             if nodes_df[col].dtype == 'object':
                 nodes_df[col] = pd.to_numeric(nodes_df[col], errors='coerce')
 
+        # Mark TLS nodes
         nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
 
+        # Filter to show only TLS nodes but keep all edges
+        tls_nodes_df = nodes_df[nodes_df['is_tls']].copy()
+
         # Remove points with invalid coordinates
-        valid_coords = (~nodes_df['lat'].isna() & ~nodes_df['lon'].isna() &
-                        (nodes_df['lat'] != 0) & (nodes_df['lon'] != 0))
+        valid_coords = (~tls_nodes_df['lat'].isna() & ~tls_nodes_df['lon'].isna() &
+                        (tls_nodes_df['lat'] != 0) & (tls_nodes_df['lon'] != 0))
 
         if valid_coords.sum() == 0:
             print("No valid geographic coordinates found, falling back to network graph")
             has_geo = False
         else:
             # Filter to only valid coordinates
-            nodes_df = nodes_df[valid_coords].copy()
+            tls_nodes_df = tls_nodes_df[valid_coords].copy()
 
             # Calculate center and bounds
-            center_lat = nodes_df['lat'].mean()
-            center_lon = nodes_df['lon'].mean()
+            center_lat = tls_nodes_df['lat'].mean()
+            center_lon = tls_nodes_df['lon'].mean()
 
             # Calculate appropriate zoom level based on coordinate spread
-            lat_range = nodes_df['lat'].max() - nodes_df['lat'].min()
-            lon_range = nodes_df['lon'].max() - nodes_df['lon'].min()
+            lat_range = tls_nodes_df['lat'].max() - tls_nodes_df['lat'].min()
+            lon_range = tls_nodes_df['lon'].max() - tls_nodes_df['lon'].min()
 
             # Determine zoom level - lower value = zoomed out more
-            # Typical values: 0 (world), 5 (continent), 10 (city), 15 (streets), 20 (buildings)
             zoom_level = 10  # Default city level
 
             if lat_range > 0 or lon_range > 0:
                 # Calculate a better zoom level based on the coordinate range
-                # This is a heuristic that works reasonably well
                 max_range = max(lat_range, lon_range)
                 if max_range > 1:  # Country/region scale
                     zoom_level = 5
@@ -858,20 +878,20 @@ def create_traffic_map(data):
 
             print(f"Map center: {center_lat}, {center_lon}, zoom: {zoom_level}")
 
-            # Create node markers - IMPORTANT: Use Scattermapbox not Scattermap
-            node_markers = go.Scattermapbox(
-                lat=nodes_df['lat'],
-                lon=nodes_df['lon'],
+            # Create node markers - UPDATED: Use Scattermap instead of Scattermapbox
+            node_markers = go.Scattermap(
+                lat=tls_nodes_df['lat'],
+                lon=tls_nodes_df['lon'],
                 mode='markers+text',
                 marker=dict(
                     size=15,
-                    color=['blue' if is_tls else 'gray' for is_tls in nodes_df['is_tls']],
+                    color=['blue' for _ in tls_nodes_df['is_tls']],  # All nodes are TLS nodes
                     opacity=0.8
                 ),
-                text=nodes_df['id'],
+                text=tls_nodes_df['id'],
                 textposition="top center",
                 hoverinfo='text',
-                name='Junctions'
+                name='Traffic Lights'
             )
 
             # Add line traces for the edges if we have the data
@@ -882,22 +902,28 @@ def create_traffic_map(data):
                 target = nodes_df[nodes_df['id'] == edge['to']]
 
                 if len(source) > 0 and len(target) > 0:
-                    edge_trace = go.Scattermapbox(
-                        lat=[source.iloc[0]['lat'], target.iloc[0]['lat']],
-                        lon=[source.iloc[0]['lon'], target.iloc[0]['lon']],
-                        mode='lines',
-                        line=dict(width=3, color='gray'),
-                        opacity=0.8,
-                        hoverinfo='none'
-                    )
-                    edge_traces.append(edge_trace)
+                    # Check if both nodes have valid coordinates
+                    source_valid = not source['lat'].isna().any() and not source['lon'].isna().any()
+                    target_valid = not target['lat'].isna().any() and not target['lon'].isna().any()
+
+                    if source_valid and target_valid:
+                        # UPDATED: Use Scattermap instead of Scattermapbox
+                        edge_trace = go.Scattermap(
+                            lat=[source.iloc[0]['lat'], target.iloc[0]['lat']],
+                            lon=[source.iloc[0]['lon'], target.iloc[0]['lon']],
+                            mode='lines',
+                            line=dict(width=3, color='gray'),
+                            opacity=0.8,
+                            hoverinfo='none'
+                        )
+                        edge_traces.append(edge_trace)
 
             # Combine all traces
             traces = edge_traces + [node_markers]
 
-            # Create mapbox layout
+            # Create mapbox layout - UPDATED: Use map instead of mapbox
             layout = go.Layout(
-                mapbox=dict(
+                map=dict(  # Changed from mapbox to map
                     style="open-street-map",
                     center=dict(
                         lat=center_lat,
@@ -916,11 +942,13 @@ def create_traffic_map(data):
         # Fall back to network graph if no valid coordinates
         has_geo = False
 
-
     if not has_geo:
         # Use x, y coordinates for a network graph instead
         nodes_df = pd.DataFrame(data['nodes'])
         edges_df = pd.DataFrame(data['edges'])
+
+        # Mark TLS nodes
+        nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
 
         # Check if x/y are available
         if 'x' not in nodes_df.columns or 'y' not in nodes_df.columns:
@@ -936,26 +964,26 @@ def create_traffic_map(data):
             nodes_df['x'] = nodes_df['id'].map(lambda nid: pos[nid][0])
             nodes_df['y'] = nodes_df['id'].map(lambda nid: pos[nid][1])
 
-        # Mark TLS nodes
-        nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
+        # Filter to show only TLS nodes
+        tls_nodes_df = nodes_df[nodes_df['is_tls']].copy()
 
-        # Create node traces
+        # Create node traces - only for TLS nodes
         node_trace = go.Scatter(
-            x=nodes_df['x'],
-            y=nodes_df['y'],
+            x=tls_nodes_df['x'],
+            y=tls_nodes_df['y'],
             mode='markers+text',
             marker=dict(
                 size=20,
-                color=['blue' if is_tls else 'lightgray' for is_tls in nodes_df['is_tls']],
+                color='blue',
                 line=dict(width=2, color='black')
             ),
-            text=nodes_df['id'],
+            text=tls_nodes_df['id'],
             textposition="top center",
             hoverinfo='text',
-            name='Junctions'
+            name='Traffic Lights'
         )
 
-        # Create edge traces
+        # Create edge traces - for all edges
         edge_traces = []
         for _, edge in edges_df.iterrows():
             # Find source and target nodes
@@ -967,7 +995,7 @@ def create_traffic_map(data):
                     x=[source.iloc[0]['x'], target.iloc[0]['x']],
                     y=[source.iloc[0]['y'], target.iloc[0]['y']],
                     mode='lines',
-                    line=dict(width=3, color='darkgray'),
+                    line=dict(width=2, color='darkgray'),
                     hoverinfo='text',
                     text=edge['id'] if 'name' not in edge else edge['name'],
                 )
@@ -989,6 +1017,287 @@ def create_traffic_map(data):
 
     return fig
 
+
+def create_empty_network_view():
+    """Create empty network view placeholder."""
+    fig = go.Figure()
+
+    fig.update_layout(
+        title="No Data Available",
+        showlegend=False,
+        plot_bgcolor='white',
+        height=600,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        annotations=[
+            dict(
+                x=0.5,
+                y=0.5,
+                xref="paper",
+                yref="paper",
+                text="Select an agent, episode, and time step to view the network.",
+                showarrow=False,
+                font=dict(size=14)
+            )
+        ]
+    )
+
+    return fig
+
+
+def preprocess_node_data(data):
+    """Create efficient node data lookup structures"""
+    nodes_df = pd.DataFrame(data['nodes'])
+    tls_ids = set(data['tls_ids'])
+
+    # Create lookup for TLS nodes and their indices
+    tls_indices = []
+    tls_node_ids = []
+
+    for i, node_id in enumerate(nodes_df['id']):
+        if node_id in tls_ids:
+            tls_indices.append(i)
+            tls_node_ids.append(node_id)
+
+    return {
+        'tls_indices': tls_indices,
+        'tls_ids': tls_node_ids
+    }
+
+
+def create_base_geo_map(data):
+    """Create the base geographic map without traffic data"""
+    # Check if lat/lon coordinates are available
+    has_geo = all(('lat' in node and 'lon' in node and node['lat'] is not None and node['lon'] is not None)
+                  for node in data['nodes'])
+
+    if has_geo:
+        # Prepare data for map with actual coordinates
+        nodes_df = pd.DataFrame(data['nodes'])
+
+        # Convert lat/lon to numeric if they're strings
+        for col in ['lat', 'lon']:
+            if nodes_df[col].dtype == 'object':
+                nodes_df[col] = pd.to_numeric(nodes_df[col], errors='coerce')
+
+        # Mark TLS nodes
+        nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
+
+        # Filter to show only TLS nodes but keep all edges
+        tls_nodes_df = nodes_df[nodes_df['is_tls']].copy()
+
+        # Remove points with invalid coordinates
+        valid_coords = (~tls_nodes_df['lat'].isna() & ~tls_nodes_df['lon'].isna() &
+                        (tls_nodes_df['lat'] != 0) & (tls_nodes_df['lon'] != 0))
+
+        if valid_coords.sum() == 0:
+            print("No valid geographic coordinates found, falling back to network graph")
+            return create_base_network_map(data)
+
+        # Filter to only valid coordinates
+        tls_nodes_df = tls_nodes_df[valid_coords].copy()
+
+        # Calculate center and bounds
+        center_lat = tls_nodes_df['lat'].mean()
+        center_lon = tls_nodes_df['lon'].mean()
+
+        # Calculate appropriate zoom level based on coordinate spread
+        lat_range = tls_nodes_df['lat'].max() - tls_nodes_df['lat'].min()
+        lon_range = tls_nodes_df['lon'].max() - tls_nodes_df['lon'].min()
+
+        # Determine zoom level - lower value = zoomed out more
+        zoom_level = 10  # Default city level
+
+        if lat_range > 0 or lon_range > 0:
+            # Calculate a better zoom level based on the coordinate range
+            max_range = max(lat_range, lon_range)
+            if max_range > 1:  # Country/region scale
+                zoom_level = 5
+            elif max_range > 0.1:  # City scale
+                zoom_level = 10
+            elif max_range > 0.01:  # Neighborhood scale
+                zoom_level = 13
+            else:  # Street scale
+                zoom_level = 15
+
+        # Create node markers with neutral color (will be updated later)
+        node_markers = go.Scattermapbox(
+            lat=tls_nodes_df['lat'],
+            lon=tls_nodes_df['lon'],
+            mode='markers+text',
+            marker=dict(
+                size=15,
+                color=['lightblue' for _ in tls_nodes_df['is_tls']],
+                opacity=0.8
+            ),
+            text=tls_nodes_df['id'],
+            textposition="top center",
+            hoverinfo='text',
+            name='Traffic Lights'
+        )
+
+        # Add line traces for the edges if we have the data
+        edge_traces = []
+        for _, edge in data['edges_df'].iterrows():
+            # Get source and target nodes
+            source = nodes_df[nodes_df['id'] == edge['from']]
+            target = nodes_df[nodes_df['id'] == edge['to']]
+
+            if len(source) > 0 and len(target) > 0:
+                # Check if both nodes have valid coordinates
+                source_valid = not source['lat'].isna().any() and not source['lon'].isna().any()
+                target_valid = not target['lat'].isna().any() and not target['lon'].isna().any()
+
+                if source_valid and target_valid:
+                    edge_trace = go.Scattermapbox(
+                        lat=[source.iloc[0]['lat'], target.iloc[0]['lat']],
+                        lon=[source.iloc[0]['lon'], target.iloc[0]['lon']],
+                        mode='lines',
+                        line=dict(width=3, color='gray'),
+                        opacity=0.8,
+                        hoverinfo='none'
+                    )
+                    edge_traces.append(edge_trace)
+
+        # Combine all traces
+        traces = edge_traces + [node_markers]
+
+        # Create figure with mapbox
+        fig = go.Figure(data=traces)
+
+        # Update layout
+        fig.update_layout(
+            mapbox=dict(
+                style="open-street-map",
+                center=dict(
+                    lat=center_lat,
+                    lon=center_lon
+                ),
+                zoom=zoom_level
+            ),
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=600,
+            showlegend=False
+        )
+
+        return fig
+    else:
+        # If no geographic coordinates, fall back to network view
+        return create_base_network_map(data)
+
+
+def create_base_network_map(data):
+    """Create the base network map with all nodes and actual connections"""
+    nodes_df = pd.DataFrame(data['nodes'])
+    edges_df = pd.DataFrame(data['edges'])
+
+    # Mark TLS nodes
+    nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
+
+    # Check if x/y are available
+    if 'x' not in nodes_df.columns or 'y' not in nodes_df.columns:
+        # Generate position data if not available
+        print("No x/y coordinates available, generating network layout")
+        pos = {}
+
+        # First place TLS nodes in a circle
+        tls_nodes = nodes_df[nodes_df['is_tls']]
+        non_tls_nodes = nodes_df[~nodes_df['is_tls']]
+
+        # Place TLS nodes in inner circle
+        inner_radius = 250
+        for i, (_, node) in enumerate(tls_nodes.iterrows()):
+            angle = 2 * np.pi * i / len(tls_nodes) if len(tls_nodes) > 0 else 0
+            pos[node['id']] = (inner_radius * np.cos(angle), inner_radius * np.sin(angle))
+
+        # Place non-TLS nodes in outer circles, grouped by connectivity
+        # This is a simple approach - could be improved with force-directed layout
+        outer_radius = 400
+        for i, (_, node) in enumerate(non_tls_nodes.iterrows()):
+            angle = 2 * np.pi * i / len(non_tls_nodes) if len(non_tls_nodes) > 0 else 0
+            pos[node['id']] = (outer_radius * np.cos(angle), outer_radius * np.sin(angle))
+
+        # Add x, y columns
+        nodes_df['x'] = nodes_df['id'].map(lambda nid: pos[nid][0])
+        nodes_df['y'] = nodes_df['id'].map(lambda nid: pos[nid][1])
+
+    # Create node traces - separate TLS and non-TLS nodes
+    tls_nodes_df = nodes_df[nodes_df['is_tls']].copy()
+    non_tls_nodes_df = nodes_df[~nodes_df['is_tls']].copy()
+
+    # TLS nodes (bigger, highlighted)
+    tls_node_trace = go.Scatter(
+        x=tls_nodes_df['x'],
+        y=tls_nodes_df['y'],
+        mode='markers+text',
+        marker=dict(
+            size=20,
+            color='lightblue',  # Neutral color that will be updated based on traffic
+            line=dict(width=2, color='black')
+        ),
+        text=tls_nodes_df['id'],
+        textposition="top center",
+        hoverinfo='text',
+        name='Traffic Lights'
+    )
+
+    # Non-TLS nodes (smaller)
+    non_tls_node_trace = go.Scatter(
+        x=non_tls_nodes_df['x'],
+        y=non_tls_nodes_df['y'],
+        mode='markers',
+        marker=dict(
+            size=10,
+            color='gray',
+            line=dict(width=1, color='darkgray')
+        ),
+        text=non_tls_nodes_df['id'],
+        hoverinfo='text',
+        name='Junctions'
+    )
+
+    # Create edge traces - for ALL actual connections from edges_df
+    edge_traces = []
+    for _, edge in edges_df.iterrows():
+        # Find source and target nodes
+        source = nodes_df[nodes_df['id'] == edge['from']]
+        target = nodes_df[nodes_df['id'] == edge['to']]
+
+        if len(source) > 0 and len(target) > 0:
+            # Set line style based on whether it connects TLS nodes
+            is_tls_source = source.iloc[0]['is_tls']
+            is_tls_target = target.iloc[0]['is_tls']
+
+            line_width = 2 if (is_tls_source or is_tls_target) else 1
+            line_color = 'darkgray' if (is_tls_source or is_tls_target) else 'lightgray'
+
+            edge_trace = go.Scatter(
+                x=[source.iloc[0]['x'], target.iloc[0]['x']],
+                y=[source.iloc[0]['y'], target.iloc[0]['y']],
+                mode='lines',
+                line=dict(width=line_width, color=line_color),
+                hoverinfo='text',
+                text=edge['id'] if 'id' in edge else (
+                    edge['name'] if 'name' in edge else f"{edge['from']} → {edge['to']}"
+                )
+            )
+            edge_traces.append(edge_trace)
+
+    # Combine traces - put edges first, then non-TLS nodes, then TLS nodes
+    fig = go.Figure(data=edge_traces + [non_tls_node_trace, tls_node_trace])
+
+    # Update layout
+    fig.update_layout(
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor='white',
+        height=600,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+    )
+
+    return fig
 
 def create_empty_heatmap():
     """Create empty heatmap for placeholder"""
@@ -1712,12 +2021,26 @@ def update_timestep_on_interval(n_intervals, max_step, current_step):
      Output('queue-length-bar', 'figure')],
     [Input('geo-agent-dropdown', 'value'),
      Input('geo-episode-dropdown', 'value'),
-     Input('geo-timestep-slider', 'value')]
+     Input('geo-timestep-slider', 'value'),
+     Input('view-type-toggle', 'value'),
+     Input('base-geo-map', 'data'),
+     Input('base-network-map', 'data'),
+     Input('node-data-lookup', 'data')]
 )
-def update_traffic_map(agent, episode, step):
-    """Update the traffic map and related visualizations"""
+def update_traffic_map(agent, episode, step, view_type, base_geo_data, base_network_data, node_lookup):
+    """Update the traffic map based on traffic data without recreating the entire visualization"""
     if not agent or not episode:
-        return create_traffic_map(data), create_empty_heatmap(), create_empty_bar()
+        if view_type == 'network':
+            return create_empty_network_view(), create_empty_heatmap(), create_empty_bar()
+        else:
+            return create_traffic_map(data), create_empty_heatmap(), create_empty_bar()
+
+    # Check if we have base map data
+    if (view_type == 'geo' and not base_geo_data) or (view_type == 'network' and not base_network_data):
+        if view_type == 'network':
+            return create_empty_network_view(), create_empty_heatmap(), create_empty_bar()
+        else:
+            return create_traffic_map(data), create_empty_heatmap(), create_empty_bar()
 
     # Filter data for this timestep
     filtered_data = data['step_df'][
@@ -1728,29 +2051,20 @@ def update_traffic_map(agent, episode, step):
 
     if filtered_data.empty:
         print(f"No data for agent={agent}, episode={episode}, step={step}")
-        return create_traffic_map(data), create_empty_heatmap(), create_empty_bar()
+        if view_type == 'network':
+            return go.Figure(base_network_data), create_empty_heatmap(), create_empty_bar()
+        else:
+            return go.Figure(base_geo_data), create_empty_heatmap(), create_empty_bar()
 
-    # Update map - start with original traffic map
-    map_fig = create_traffic_map(data)
+    # Create lookup dictionaries for faster access
+    tls_queue = {row['tls_id']: row['queue_length'] for _, row in filtered_data.iterrows()}
+    tls_waiting = {row['tls_id']: row['waiting_time'] for _, row in filtered_data.iterrows()}
 
-    # Check which type of map we're using
-    is_mapbox = any(isinstance(trace, go.Scattermapbox) for trace in map_fig.data)
-
-    # Create a mapping from tls_id to queue_length and waiting_time
-    tls_queue = dict(zip(filtered_data['tls_id'], filtered_data['queue_length']))
-    tls_waiting = dict(zip(filtered_data['tls_id'], filtered_data['waiting_time']))
-
-    # Prepare node data
-    nodes_df = pd.DataFrame(data['nodes']).copy()
-    nodes_df['is_tls'] = nodes_df['id'].isin(data['tls_ids'])
-    nodes_df['queue_length'] = nodes_df['id'].map(lambda x: tls_queue.get(x, 0))
-    nodes_df['waiting_time'] = nodes_df['id'].map(lambda x: tls_waiting.get(x, 0))
-
-    # Create color scale for queue length
+    # Calculate max values for scaling
     max_queue = max(filtered_data['queue_length'].max(), 1)
     max_waiting = max(filtered_data['waiting_time'].max(), 1)
 
-    # Normalize data for colors
+    # Color function for traffic lights
     def get_color(value, max_value):
         """Get color based on normalized value from green to red"""
         # Normalize value to 0-1
@@ -1763,47 +2077,90 @@ def update_traffic_map(agent, episode, step):
         else:
             return 'red'  # High
 
-    if is_mapbox:
-        # Update mapbox markers
-        for i, trace in enumerate(map_fig.data):
-            if isinstance(trace, go.Scattermapbox) and trace.mode and 'markers' in trace.mode:
-                # Get node IDs from the text property
-                if trace.text is not None:
-                    node_ids = trace.text
+    # Create figure based on view type
+    if view_type == 'network':
+        # Use the network base map
+        fig = go.Figure(base_network_data)
 
-                    # Update marker colors based on queue_length for TLS nodes
-                    new_colors = []
-                    for node_id in node_ids:
-                        if node_id in data['tls_ids']:
-                            queue = tls_queue.get(node_id, 0)
-                            new_colors.append(get_color(queue, max_queue))
-                        else:
-                            new_colors.append('gray')
+        # Get the TLS IDs we need to update
+        tls_ids = node_lookup['tls_ids'] if node_lookup else data['tls_ids']
 
-                    # Update the marker colors
-                    map_fig.data[i].marker.color = new_colors
+        # Update TLS node colors and sizes based on traffic data
+        new_colors = []
+        new_sizes = []
+
+        for tls_id in tls_ids:
+            queue = tls_queue.get(tls_id, 0)
+            waiting = tls_waiting.get(tls_id, 0)
+
+            # Size based on queue length, color based on waiting time
+            size = 20 + 30 * (queue / max_queue) if max_queue > 0 else 20
+            color = get_color(waiting, max_waiting)
+
+            new_colors.append(color)
+            new_sizes.append(size)
+
+        # Update the TLS node trace (should be the last trace)
+        if len(fig.data) >= 2:  # Ensure we have at least 2 traces
+            fig.update_traces(
+                marker=dict(
+                    color=new_colors,
+                    size=new_sizes,
+                    line=dict(width=2, color='black')
+                ),
+                selector=dict(name='Traffic Lights')
+            )
     else:
-        # Update network graph
-        for i, trace in enumerate(map_fig.data):
-            if isinstance(trace, go.Scatter) and trace.mode and 'markers' in trace.mode:
-                # Get node IDs from the text property
-                if trace.text is not None:
-                    node_ids = trace.text
+        # Use the geographic base map
+        fig = go.Figure(base_geo_data)
 
-                    # Update marker colors based on queue_length for TLS nodes
+        # Check which type of traces we have
+        is_mapbox = any('type' in trace and trace['type'] == 'scattermapbox' for trace in fig.data)
+
+        if is_mapbox:
+            # Update markers for mapbox
+            for i, trace in enumerate(fig.data):
+                if 'mode' in trace and 'markers' in trace['mode']:
+                    # Get node IDs from text
+                    node_ids = trace['text']
+
+                    # Update colors based on waiting time
                     new_colors = []
                     for node_id in node_ids:
-                        if node_id in data['tls_ids']:
-                            queue = tls_queue.get(node_id, 0)
-                            new_colors.append(get_color(queue, max_queue))
-                        else:
-                            new_colors.append('lightgray')
+                        waiting = tls_waiting.get(node_id, 0)
+                        new_colors.append(get_color(waiting, max_waiting))
 
-                    # Update the marker colors
-                    map_fig.data[i].marker.color = new_colors
+                    # Update marker colors
+                    fig.update_traces(
+                        marker=dict(color=new_colors),
+                        selector=dict(mode='markers+text')
+                    )
+        else:
+            # Update for regular scatter plot
+            tls_ids = node_lookup['tls_ids'] if node_lookup else data['tls_ids']
+
+            # Update TLS node colors
+            new_colors = []
+            for tls_id in tls_ids:
+                waiting = tls_waiting.get(tls_id, 0)
+                new_colors.append(get_color(waiting, max_waiting))
+
+            # Update the TLS node trace
+            fig.update_traces(
+                marker=dict(color=new_colors),
+                selector=dict(name='Traffic Lights')
+            )
+
+    # Add a title showing the current step
+    fig.update_layout(
+        title=f"Traffic State at Step {step}",
+        title_x=0.5,
+        title_font=dict(size=14)
+    )
 
     # Create waiting time heatmap
-    tls_waiting_df = filtered_data[['tls_id', 'waiting_time']].sort_values('waiting_time', ascending=False)
+    tls_waiting_df = pd.DataFrame(list(tls_waiting.items()), columns=['tls_id', 'waiting_time'])
+    tls_waiting_df = tls_waiting_df.sort_values('waiting_time', ascending=False)
 
     if not tls_waiting_df.empty:
         heatmap_fig = px.imshow(
@@ -1831,7 +2188,8 @@ def update_traffic_map(agent, episode, step):
         heatmap_fig = create_empty_heatmap()
 
     # Create queue length bar chart
-    tls_queue_df = filtered_data[['tls_id', 'queue_length']].sort_values('queue_length', ascending=False)
+    tls_queue_df = pd.DataFrame(list(tls_queue.items()), columns=['tls_id', 'queue_length'])
+    tls_queue_df = tls_queue_df.sort_values('queue_length', ascending=False)
 
     if not tls_queue_df.empty:
         queue_fig = px.bar(
@@ -1852,10 +2210,7 @@ def update_traffic_map(agent, episode, step):
     else:
         queue_fig = create_empty_bar()
 
-    # Add some debugging info
-    print(f"Updated map for agent={agent}, episode={episode}, step={step}, TLS count={len(tls_queue_df)}")
-
-    return map_fig, heatmap_fig, queue_fig
+    return fig, heatmap_fig, queue_fig
 
 
 @callback(
@@ -1909,6 +2264,28 @@ def update_selected_junction_details(click_data, agent, episode, step):
     except Exception as e:
         return html.P(f"Error: {str(e)}")
 
+
+@callback(
+    [Output('base-geo-map', 'data'),
+     Output('base-network-map', 'data'),
+     Output('node-data-lookup', 'data')],
+    Input('network-dropdown', 'value')
+)
+def generate_base_maps(network):
+    """Generate base maps once when network is selected"""
+    if not network or network not in data['available_networks']:
+        return None, None, None
+
+    # Generate the base geographic map
+    geo_fig = create_base_geo_map(data)
+
+    # Generate the base network map
+    network_fig = create_base_network_map(data)
+
+    # Create node data lookup for efficient updates
+    node_lookup = preprocess_node_data(data)
+
+    return geo_fig.to_dict(), network_fig.to_dict(), node_lookup
 
 # ---------- CSS Styling ----------
 app.index_string = '''
@@ -2241,6 +2618,35 @@ app.index_string = '''
                 font-size: 0.8rem;
                 margin-left: 5px;
                 color: #718096;
+            }
+            
+            /* View toggle styles */
+            .view-toggle {
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+                margin-top: 5px;
+            }
+            
+            .view-toggle .radio-items {
+                display: flex;
+                gap: 15px;
+            }
+            
+            /* Responsive adjustments for the layout */
+            @media (max-width: 768px) {
+                .tab-header-right {
+                    flex-direction: column;
+                }
+                
+                .filter-item {
+                    width: 100%;
+                }
+                
+                .view-toggle {
+                    flex-direction: row;
+                    justify-content: space-between;
+                }
             }
 
             /* Junction details */
