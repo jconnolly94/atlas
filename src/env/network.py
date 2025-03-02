@@ -272,7 +272,6 @@ class Network(NetworkInterface):
     def close(self) -> None:
         """Close the simulation."""
         traci.close()
-        print("Simulation closed.")
 
     def is_simulation_complete(self) -> bool:
         """Check if the simulation is complete."""
