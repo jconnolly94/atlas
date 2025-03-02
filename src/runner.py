@@ -128,6 +128,19 @@ class Runner:
         # Run experiments in parallel
         with Manager() as manager:
             shared_results = manager.list()
+            # Add shared progress dictionary for more granular updates
+            shared_progress = manager.dict()
+
+            # Initialize progress for each agent
+            for agent_type in agent_types:
+                shared_progress[agent_type] = {
+                    'total_episodes': num_episodes,
+                    'current_episode': 0,
+                    'current_step': 0,
+                    'max_steps': 1000,  # Default, will be updated
+                    'status': 'waiting'
+                }
+
             processes = []
 
             # Launch worker processes with delay between them
@@ -146,7 +159,8 @@ class Runner:
                         port_range,
                         num_episodes,
                         use_gui,
-                        shared_results
+                        shared_results,
+                        shared_progress  # Pass the shared progress dict
                     )
                 )
                 processes.append(p)
@@ -158,7 +172,7 @@ class Runner:
                 time.sleep(5)
 
             # Monitor progress
-            self.monitor_progress(processes)
+            self.monitor_progress(processes, shared_progress)
 
             # Wait for all processes to complete
             for p in processes:
@@ -189,25 +203,80 @@ class Runner:
         else:
             self.console.print("[yellow]No results to combine.")
 
-    def monitor_progress(self, processes):
-        """Monitor progress of worker processes.
+    def monitor_progress(self, processes, shared_progress):
+        """Monitor progress with detailed updates.
 
         Args:
             processes: List of worker processes
+            shared_progress: Shared dictionary with progress info
         """
-        total_processes = len(processes)
+        # Calculate total work units
+        total_agents = len(processes)
 
-        with tqdm(total=total_processes, desc="Overall Progress") as progress:
-            completed = 0
+        # Set up progress bar
+        with tqdm(total=100, desc="Simulation Progress") as progress:
+            while any(p.is_alive() for p in processes):
+                # Calculate overall progress percentage
+                progress_values = []
 
-            while completed < total_processes:
-                current_completed = sum(1 for p in processes if not p.is_alive())
+                for agent_type, info in shared_progress.items():
+                    # Calculate episode progress (0.0 - 1.0)
+                    if info['total_episodes'] > 0:
+                        episode_progress = info['current_episode'] / info['total_episodes']
 
-                if current_completed > completed:
-                    progress.update(current_completed - completed)
-                    completed = current_completed
+                        # Add step progress within current episode
+                        if info['current_episode'] < info['total_episodes'] and info['max_steps'] > 0:
+                            step_fraction = min(1.0, info['current_step'] / info['max_steps'])
+                            episode_fraction = 1.0 / info['total_episodes']
+                            agent_progress = episode_progress + (step_fraction * episode_fraction)
+                        else:
+                            agent_progress = episode_progress
+                    else:
+                        agent_progress = 0.0
 
-                time.sleep(1)
+                    progress_values.append(agent_progress)
+
+                # Calculate average progress across all agents
+                if progress_values:
+                    overall_progress = sum(progress_values) / len(progress_values)
+                    progress_percentage = int(overall_progress * 100)
+
+                    # Update progress bar
+                    progress.n = min(100, progress_percentage)
+                    progress.refresh()
+
+                # Build status text
+                status_parts = []
+                running_agents = 0
+
+                for agent_type, info in shared_progress.items():
+                    if info['status'] == 'completed':
+                        status = f"{agent_type}: Done"
+                    elif info['status'] == 'error':
+                        status = f"{agent_type}: Error"
+                    elif info['status'] == 'running':
+                        running_agents += 1
+                        status = f"{agent_type}: Ep {info['current_episode'] + 1}/{info['total_episodes']} (Step {info['current_step']})"
+                    else:
+                        status = f"{agent_type}: {info['status'].capitalize()}"
+
+                    status_parts.append(status)
+
+                # Keep status text from getting too long
+                if len(status_parts) > 3:
+                    short_status = status_parts[:2]
+                    short_status.append(f"...and {len(status_parts) - 2} more")
+                    status_parts = short_status
+
+                if status_parts:
+                    progress.set_description(
+                        f"Agents running: {running_agents}/{total_agents} | " + " | ".join(status_parts))
+
+                time.sleep(0.5)  # Update more frequently
+
+            # Ensure progress bar completes
+            progress.n = 100
+            progress.refresh()
 
     def display_results(self, results):
         """Display experiment results.
@@ -234,7 +303,7 @@ class Runner:
         self.console.print(table)
 
     @staticmethod
-    def worker_process(config, agent_type, port_range, num_episodes, use_gui, shared_results):
+    def worker_process(config, agent_type, port_range, num_episodes, use_gui, shared_results, shared_progress):
         """Worker process for running a single experiment.
 
         Args:
@@ -244,6 +313,7 @@ class Runner:
             num_episodes: Number of episodes to run
             use_gui: Whether to use the SUMO GUI
             shared_results: Shared list for collecting results
+            shared_progress: Shared dictionary for tracking progress
         """
         try:
             # Generate worker ID
@@ -259,6 +329,15 @@ class Runner:
             )
             logger = logging.getLogger(worker_id)
             logger.info(f"Worker {worker_id} starting (port range: {port_range})")
+
+            # Update progress to indicate start
+            shared_progress[agent_type] = {
+                'total_episodes': num_episodes,
+                'current_episode': 0,
+                'current_step': 0,
+                'max_steps': 1000,
+                'status': 'starting'
+            }
 
             # Create network with retries
             network_name, config_path = config
@@ -333,6 +412,15 @@ class Runner:
             episodes_completed = 0
             for episode in range(num_episodes):
                 try:
+                    # Update progress for episode start
+                    shared_progress[agent_type] = {
+                        'total_episodes': num_episodes,
+                        'current_episode': episode,
+                        'current_step': 0,
+                        'max_steps': 1000,
+                        'status': 'running'
+                    }
+
                     # Reset environment
                     env.reset()
                     done = False
@@ -344,6 +432,14 @@ class Runner:
                         # Get actions from agents
                         next_states, rewards, done = env.step(agents)
                         step += 1
+
+                        # Update progress periodically (every 20 steps)
+                        if step % 20 == 0:
+                            shared_progress[agent_type]['current_step'] = step
+                            shared_progress[agent_type]['max_steps'] = max_steps
+
+                    # Update progress for episode completion
+                    shared_progress[agent_type]['current_step'] = step
 
                     if not done and step >= max_steps:
                         logger.info(f"Episode {episode + 1} reached max steps without natural termination")
@@ -363,9 +459,19 @@ class Runner:
                 except Exception as e:
                     logger.error(f"Error in episode {episode + 1}: {str(e)}")
                     traceback.print_exc()
+                    shared_progress[agent_type]['status'] = 'error'
                     break
 
-                    # Save data and cleanup
+            # Update progress for completion
+            shared_progress[agent_type] = {
+                'total_episodes': num_episodes,
+                'current_episode': num_episodes,
+                'current_step': 0,
+                'max_steps': 0,
+                'status': 'completed'
+            }
+
+            # Save data and cleanup
             collector.save_data(f"{network_name}_{agent_type}_{port}")
 
             # Close connections
@@ -391,11 +497,16 @@ class Runner:
             print(f"Error in worker for {agent_type} (PID {os.getpid()}): {str(e)}")
             traceback.print_exc()
 
+            # Update progress to indicate error
+            try:
+                shared_progress[agent_type]['status'] = 'error'
+            except:
+                pass
+
             # Try to close any open connections
             try:
                 import traci
                 traci.close()
-                print("Simulation closed.")
             except:
                 pass
 
