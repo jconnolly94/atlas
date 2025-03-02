@@ -9,6 +9,7 @@ from rich.table import Table
 from multiprocessing import Process, Manager
 import traceback
 import logging
+import numpy as np
 
 # Configure logging
 logging.basicConfig(
@@ -344,15 +345,27 @@ class Runner:
                         next_states, rewards, done = env.step(agents)
                         step += 1
 
+                    if not done and step >= max_steps:
+                        logger.info(f"Episode {episode + 1} reached max steps without natural termination")
+                        # Force notify observers about episode completion
+                        env.notify_episode_complete({
+                            'episode': env.episode_number,
+                            'avg_waiting': np.mean(env.episode_metrics['waiting_times']) if env.episode_metrics[
+                                'waiting_times'] else 0,
+                            'total_reward': sum(env.episode_metrics['rewards']),
+                            'arrived_vehicles': network.get_arrived_vehicles_count(),
+                            'total_steps': step
+                        })
+
                     logger.info(f"Episode {episode + 1}/{num_episodes} completed at step {step}")
                     episodes_completed = episode + 1
 
                 except Exception as e:
                     logger.error(f"Error in episode {episode + 1}: {str(e)}")
                     traceback.print_exc()
-                    break  # Exit the loop on error
+                    break
 
-            # Save data and cleanup
+                    # Save data and cleanup
             collector.save_data(f"{network_name}_{agent_type}_{port}")
 
             # Close connections
