@@ -2,10 +2,19 @@
 from .agent import Agent
 import random
 from collections import defaultdict
+from typing import Dict, Any
 
 
 class QAgent(Agent):
     """Q-learning agent for traffic signal control."""
+    
+    # Default configuration
+    DEFAULT_CONFIG = {
+        "alpha": 0.2,             # Learning rate
+        "gamma": 0.9,             # Discount factor
+        "epsilon": 0.7,           # Significantly increased for much more exploration
+        "state_bin_size": 5
+    }
 
     def __init__(self, tls_id, network, alpha=0.1, gamma=0.9, epsilon=0.1, state_bin_size=5):
         """Initialize the agent.
@@ -33,6 +42,27 @@ class QAgent(Agent):
 
         # Track last action for reward calculation
         self.last_action = None
+        
+    @classmethod
+    def create(cls, tls_id, network, **kwargs):
+        """Create an instance of the QAgent with proper configuration.
+        
+        Args:
+            tls_id: ID of the traffic light this agent controls
+            network: Network object providing access to simulation data
+            **kwargs: Additional configuration parameters
+            
+        Returns:
+            Properly configured QAgent instance
+        """
+        # Start with default configuration
+        config = cls.DEFAULT_CONFIG.copy()
+        
+        # Override with provided kwargs
+        config.update(kwargs)
+        
+        # Create and return instance
+        return cls(tls_id, network, **config)
 
     def _discretize_state(self, state):
         """Discretize the state for Q-table lookup.

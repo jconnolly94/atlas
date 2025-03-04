@@ -1,15 +1,20 @@
 # agents/agent_factory.py
-from typing import Dict, Any, Type, Callable
+from typing import Dict, Any, Type, Callable, List, Optional
 
 from .agent import Agent
 from .q_agent import QAgent
 from .dqn_agent import DQNAgent
 from .advanced_agent import AdvancedAgent
+from .enhanced_agent import EnhancedAgent
 from .no_agent import NoAgent
 
 
 class AgentFactory:
-    """Factory for creating agents with different configurations."""
+    """Factory for creating agents with different configurations.
+    
+    Simplified to focus purely on agent instantiation without specific knowledge
+    about agent configuration. Each agent is responsible for its own configuration.
+    """
 
     def __init__(self):
         """Initialize the agent factory."""
@@ -17,38 +22,8 @@ class AgentFactory:
             "Q-Learning": QAgent,
             "DQN": DQNAgent,
             "Advanced": AdvancedAgent,
+            "Enhanced": EnhancedAgent,
             "Baseline": NoAgent
-        }
-
-        # Default configurations for different agent types
-        self.default_configs = {
-            "Q-Learning": {
-                "alpha": 0.1,
-                "gamma": 0.9,
-                "epsilon": 0.1,
-                "state_bin_size": 5
-            },
-            "DQN": {
-                "alpha": 0.001,
-                "gamma": 0.95,
-                "epsilon": 0.1,
-                "epsilon_decay": 0.995,
-                "epsilon_min": 0.01,
-                "batch_size": 32,
-                "memory_size": 10000,
-                "target_update_freq": 100
-            },
-            "Advanced": {
-                "alpha": 0.001,
-                "gamma": 0.95,
-                "epsilon": 0.1,
-                "epsilon_decay": 0.995,
-                "epsilon_min": 0.01,
-                "batch_size": 32,
-                "memory_size": 10000,
-                "target_update_freq": 100
-            },
-            "Baseline": {}
         }
 
     def create_agent(self, agent_type: str, tls_id: str, network, **kwargs) -> Agent:
@@ -69,40 +44,11 @@ class AgentFactory:
         if agent_type not in self.agent_types:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
-        # Get agent class and default config
+        # Get agent class
         agent_class = self.agent_types[agent_type]
-        config = self.default_configs[agent_type].copy()
-
-        # Override defaults with provided kwargs
-        config.update(kwargs)
-
-        # For the advanced agent, we need to provide additional parameters
-        # related to its action space
-        if agent_type == "Advanced":
-            # Get possible phases for this traffic light
-            possible_phases = network.get_possible_phases(tls_id)
-
-            # Default duration options (in seconds)
-            duration_options = [5, 10, 15, 20]
-
-            # State size based on environment
-            state_size = 6  # Default size based on state features
-
-            # Create agent with combined parameters
-            agent = agent_class(
-                possible_phases=possible_phases,
-                duration_options=duration_options,
-                state_size=state_size,
-                **config
-            )
-
-            # Special handling: set traffic light association
-            agent.set_traffic_light(tls_id, network)
-
-            return agent
-
-        # For other agents, just create with standard parameters
-        return agent_class(tls_id, network, **config)
+        
+        # Let each agent configure itself
+        return agent_class.create(tls_id, network, **kwargs)
 
     def create_agents_for_network(self, agent_type: str, network) -> Dict[str, Agent]:
         """Create agents for all traffic lights in a network.
@@ -137,6 +83,10 @@ def create_dqn_agent(tls_id, network, **kwargs):
 
 def create_advanced_agent(tls_id, network, **kwargs):
     return agent_factory.create_agent("Advanced", tls_id, network, **kwargs)
+
+
+def create_enhanced_agent(tls_id, network, **kwargs):
+    return agent_factory.create_agent("Enhanced", tls_id, network, **kwargs)
 
 
 def no_agent(tls_id, network, **kwargs):

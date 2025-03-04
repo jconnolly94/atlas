@@ -1,5 +1,6 @@
 # agents/no_agent.py
 from .agent import Agent
+from typing import Dict, Any
 
 
 class NoAgent(Agent):
@@ -10,6 +11,9 @@ class NoAgent(Agent):
     This agent acts as a control case for experiments, allowing measurement
     of performance without any RL intervention.
     """
+    
+    # Default configuration (empty, since NoAgent doesn't need parameters)
+    DEFAULT_CONFIG = {}
 
     def __init__(self, tls_id, network):
         """Initialize the agent.
@@ -34,6 +38,21 @@ class NoAgent(Agent):
 
         # For data collection purposes, we need to track current action
         self.last_action = 0
+        
+    @classmethod
+    def create(cls, tls_id, network, **kwargs):
+        """Create an instance of the NoAgent.
+        
+        Args:
+            tls_id: ID of the traffic light this agent controls
+            network: Network object providing access to simulation data
+            **kwargs: Additional configuration parameters (ignored)
+            
+        Returns:
+            NoAgent instance
+        """
+        # For NoAgent, we can ignore any configuration parameters
+        return cls(tls_id, network)
 
     def choose_action(self, state):
         """

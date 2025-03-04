@@ -83,41 +83,24 @@ class DataCollector(Observer):
                 # Check if we have data to save
                 if not self.step_data:
                     logger.warning(f"No step data to save for {suffix}")
-                    # Create a minimal dataset to avoid empty file errors
-                    self.step_data.append({
-                        'agent_type': self.agent_type,
-                        'network': self.network_name,
-                        'episode': 0,
-                        'step': 0,
-                        'tls_id': 'none',
-                        'action': 0,
-                        'reward': 0.0,
-                        'waiting_time': 0.0,
-                        'vehicle_count': 0,
-                        'queue_length': 0,
-                        'phase_duration': 0.0
-                    })
+                    # Skip creating file if no data exists
+                    logger.info(f"Skipping creation of empty step data file: {step_file}")
+                else:
+                    # Convert to dataframes and save
+                    step_df = pd.DataFrame(self.step_data)
+                    step_df.to_csv(step_file, index=False)
+                    logger.info(f"Step data saved successfully: {step_file}")
 
                 if not self.episode_data:
                     logger.warning(f"No episode data to save for {suffix}")
-                    # Create a minimal dataset to avoid empty file errors
-                    self.episode_data.append({
-                        'agent_type': self.agent_type,
-                        'network': self.network_name,
-                        'episode': 0,
-                        'avg_waiting': 0.0,
-                        'arrived_vehicles': 0,
-                        'total_reward': 0.0
-                    })
+                    # Skip creating file if no data exists
+                    logger.info(f"Skipping creation of empty episode data file: {episode_file}")
+                else:
+                    # Convert to dataframes and save
+                    episode_df = pd.DataFrame(self.episode_data)
+                    episode_df.to_csv(episode_file, index=False)
+                    logger.info(f"Episode data saved successfully: {episode_file}")
 
-                # Convert to dataframes and save
-                step_df = pd.DataFrame(self.step_data)
-                episode_df = pd.DataFrame(self.episode_data)
-
-                step_df.to_csv(step_file, index=False)
-                episode_df.to_csv(episode_file, index=False)
-
-                logger.info(f"Data saved successfully: {step_file} and {episode_file}")
             except Exception as e:
                 logger.error(f"Error saving data: {str(e)}")
                 import traceback
@@ -164,20 +147,12 @@ class DataCollector(Observer):
                             logger.error(f"Error removing file {f}: {str(e)}")
                 else:
                     logger.warning("No valid step data files to combine")
-                    # Create an empty combined file to avoid errors
-                    pd.DataFrame(columns=[
-                        'agent_type', 'network', 'episode', 'step', 'tls_id',
-                        'action', 'reward', 'waiting_time', 'vehicle_count',
-                        'queue_length', 'phase_duration'
-                    ]).to_csv('data/datastore/steps/combined_step_data.csv', index=False)
+                    # Skip creating empty file
+                    logger.info("Skipping creation of empty combined step data file")
             else:
                 logger.warning("No step data files found")
-                # Create an empty combined file to avoid errors
-                pd.DataFrame(columns=[
-                    'agent_type', 'network', 'episode', 'step', 'tls_id',
-                    'action', 'reward', 'waiting_time', 'vehicle_count',
-                    'queue_length', 'phase_duration'
-                ]).to_csv('data/datastore/steps/combined_step_data.csv', index=False)
+                # Skip creating empty file
+                logger.info("Skipping creation of empty combined step data file")
 
             # Combine episode data
             episode_files = glob.glob('data/datastore/episodes/episode_data_*.csv')
@@ -209,18 +184,12 @@ class DataCollector(Observer):
                             logger.error(f"Error removing file {f}: {str(e)}")
                 else:
                     logger.warning("No valid episode data files to combine")
-                    # Create an empty combined file to avoid errors
-                    pd.DataFrame(columns=[
-                        'agent_type', 'network', 'episode', 'avg_waiting',
-                        'arrived_vehicles', 'total_reward'
-                    ]).to_csv('data/datastore/episodes/combined_episode_data.csv', index=False)
+                    # Skip creating empty file
+                    logger.info("Skipping creation of empty combined episode data file")
             else:
                 logger.warning("No episode data files found")
-                # Create an empty combined file to avoid errors
-                pd.DataFrame(columns=[
-                    'agent_type', 'network', 'episode', 'avg_waiting',
-                    'arrived_vehicles', 'total_reward'
-                ]).to_csv('data/datastore/episodes/combined_episode_data.csv', index=False)
+                # Skip creating empty file
+                logger.info("Skipping creation of empty combined episode data file")
 
         except Exception as e:
             logger.error(f"Error combining results: {str(e)}")

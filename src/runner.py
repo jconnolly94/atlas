@@ -34,6 +34,7 @@ class Runner:
             "Q-Learning",
             "DQN",
             "Advanced",
+            "Enhanced",
             "Baseline"
         ]
 
@@ -347,8 +348,7 @@ class Runner:
                     # Get random port
                     port = random.randint(port_range[0], port_range[1])
                     logger.info(f"Attempt {attempt + 1}/{max_retries}: Trying port {port}")
-                    print(
-                        f"Starting SUMO on port {port} with command: sumo -c {config_path} --no-warnings true --no-step-log true --time-to-teleport -1 --seed 42")
+
 
                     # Import components here to avoid serialization issues
                     from env.network import Network

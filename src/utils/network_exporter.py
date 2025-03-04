@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import shutil
 
 
 class NetworkExporter:
@@ -10,6 +9,25 @@ class NetworkExporter:
     @staticmethod
     def export_network_data(network, network_name):
         """Export network data as JSON files for visualization.
+
+        Args:
+            network: Network object containing the graph
+            network_name: Name of the network (used for output filename)
+
+        Returns:
+            Tuple of (nodes_file_path, edges_file_path, geojson_file_path)
+        """
+        # Export traditional JSON files
+        nodes_file, edges_file = NetworkExporter.export_json_files(network, network_name)
+
+        # Export GeoJSON format (better for map visualization)
+        geojson_file = NetworkExporter.export_geojson(network, network_name)
+
+        return nodes_file, edges_file, geojson_file
+
+    @staticmethod
+    def export_json_files(network, network_name):
+        """Export network data as separate JSON files for nodes and edges.
 
         Args:
             network: Network object containing the graph
@@ -30,21 +48,6 @@ class NetworkExporter:
         # Check if files already exist
         if os.path.exists(nodes_file) and os.path.exists(edges_file):
             logger.info(f"Network data for {network_name} already exists, skipping export")
-
-            # Copy to src directory for dashboard access
-            src_dir = os.path.join('src', 'data', 'visualization')
-            os.makedirs(src_dir, exist_ok=True)
-
-            src_nodes_file = os.path.join(src_dir, f'{network_name}_nodes.json')
-            src_edges_file = os.path.join(src_dir, f'{network_name}_edges.json')
-
-            try:
-                shutil.copy2(nodes_file, src_nodes_file)
-                shutil.copy2(edges_file, src_edges_file)
-                logger.info(f"Copied network files to src directory for dashboard")
-            except Exception as copy_error:
-                logger.warning(f"Could not copy network files to src directory: {copy_error}")
-
             return nodes_file, edges_file
 
         logger.info(f"Exporting network data for {network_name}")
@@ -105,21 +108,6 @@ class NetworkExporter:
                 json.dump(edges, f, indent=2)
 
             logger.info(f"Network data exported successfully to {nodes_file} and {edges_file}")
-
-            # Also copy to src directory for dashboard access
-            src_dir = os.path.join('src', 'data', 'visualization')
-            os.makedirs(src_dir, exist_ok=True)
-
-            src_nodes_file = os.path.join(src_dir, f'{network_name}_nodes.json')
-            src_edges_file = os.path.join(src_dir, f'{network_name}_edges.json')
-
-            try:
-                shutil.copy2(nodes_file, src_nodes_file)
-                shutil.copy2(edges_file, src_edges_file)
-                logger.info(f"Copied network files to src directory for dashboard")
-            except Exception as copy_error:
-                logger.warning(f"Could not copy network files to src directory: {copy_error}")
-
             return nodes_file, edges_file
 
         except Exception as e:
@@ -127,3 +115,141 @@ class NetworkExporter:
             import traceback
             logger.error(traceback.format_exc())
             return None, None
+
+    @staticmethod
+    def export_geojson(network, network_name):
+        """Export network data as GeoJSON for visualization.
+
+        Args:
+            network: Network object containing the graph
+            network_name: Name of the network (used for output filename)
+
+        Returns:
+            Path to the exported GeoJSON file
+        """
+        logger = logging.getLogger('NetworkExporter')
+
+        # Set up file path
+        export_dir = os.path.join('data', 'visualization')
+        os.makedirs(export_dir, exist_ok=True)
+
+        geojson_file = os.path.join(export_dir, f'{network_name}_network.geojson')
+
+        # Check if file already exists
+        if os.path.exists(geojson_file):
+            logger.info(f"GeoJSON for {network_name} already exists, skipping export")
+            return geojson_file
+
+        logger.info(f"Exporting GeoJSON for {network_name}")
+
+        try:
+            # Create GeoJSON structure
+            geojson = {
+                "type": "FeatureCollection",
+                "features": []
+            }
+
+            # Extract nodes with geographic coordinates
+            import traci
+
+            # Keep track of tls_ids for marking traffic lights
+            tls_ids = set(network.tls_ids)
+
+            for n, data in network.graph.nodes(data=True):
+                try:
+                    # Get position from TraCI
+                    x, y = traci.junction.getPosition(n)
+
+                    # Convert to geographic coordinates
+                    try:
+                        lon, lat = traci.simulation.convertGeo(x, y)
+                    except Exception as geo_error:
+                        logger.warning(f"Could not convert coordinates for node {n}: {geo_error}")
+                        lon, lat = None, None
+
+                    if lon is not None and lat is not None:
+                        # Create GeoJSON Point feature
+                        feature = {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [lon, lat]
+                            },
+                            "properties": {
+                                "id": n,
+                                "type": data.get('type', 'junction'),
+                                "is_tls": n in tls_ids,
+                                "x": float(x),
+                                "y": float(y)
+                            }
+                        }
+
+                        # Add any additional properties
+                        for key, value in data.items():
+                            if isinstance(value, (str, int, float, bool, type(None))):
+                                feature["properties"][key] = value
+
+                        geojson["features"].append(feature)
+
+                except Exception as e:
+                    logger.warning(f"Could not process node {n}: {e}")
+
+            # Extract edges as LineStrings
+            for u, v, data in network.graph.edges(data=True):
+                try:
+                    # Get source and target nodes
+                    source_coords = None
+                    target_coords = None
+
+                    # Get coordinates for both nodes
+                    try:
+                        source_x, source_y = traci.junction.getPosition(u)
+                        target_x, target_y = traci.junction.getPosition(v)
+
+                        # Convert to geographic coordinates
+                        source_lon, source_lat = traci.simulation.convertGeo(source_x, source_y)
+                        target_lon, target_lat = traci.simulation.convertGeo(target_x, target_y)
+
+                        source_coords = [source_lon, source_lat]
+                        target_coords = [target_lon, target_lat]
+                    except Exception as geo_error:
+                        logger.warning(f"Could not get coordinates for edge {u}-{v}: {geo_error}")
+                        continue
+
+                    # Create GeoJSON LineString feature
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [source_coords, target_coords]
+                        },
+                        "properties": {
+                            "id": data.get('id', f"{u}_{v}"),
+                            "from": u,
+                            "to": v,
+                            "connects_tls": u in tls_ids or v in tls_ids
+                        }
+                    }
+
+                    # Add any additional properties
+                    for key, value in data.items():
+                        if isinstance(value, (str, int, float, bool, type(None))):
+                            feature["properties"][key] = value
+
+                    geojson["features"].append(feature)
+
+                except Exception as e:
+                    logger.warning(f"Could not process edge {u}-{v}: {e}")
+
+            # Write to file
+            with open(geojson_file, 'w') as f:
+                json.dump(geojson, f, indent=2)
+
+            logger.info(f"GeoJSON exported successfully to {geojson_file}")
+            return geojson_file
+
+        except Exception as e:
+            logger.error(f"Error exporting GeoJSON: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None

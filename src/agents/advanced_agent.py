@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import deque
+from typing import List, Dict, Any
 from .agent import Agent
 
 
@@ -42,17 +43,28 @@ class AdvancedAgent(Agent):
     Advanced agent using Deep Q-Learning with a combined action space
     that includes both phase selection and duration selection.
     """
+    
+    # Default configuration
+    DEFAULT_CONFIG = {
+        "alpha": 0.001,           # Learning rate
+        "gamma": 0.95,            # Discount factor
+        "epsilon": 0.8,           # Much higher exploration rate
+        "epsilon_decay": 0.9998,  # Much slower decay to keep exploring longer
+        "epsilon_min": 0.1,       # Higher minimum to maintain some exploration
+        "batch_size": 32,
+        "memory_size": 20000,     # Increased from 10000 for more experience
+        "target_update_freq": 200 # Less frequent updates for stability across episodes
+    }
 
-    def __init__(self, possible_phases, duration_options, state_size,
-                 alpha=0.001, gamma=0.95, epsilon=0.1, epsilon_decay=0.995,
-                 epsilon_min=0.01, batch_size=32, memory_size=10000,
-                 target_update_freq=100):
+    def __init__(self, tls_id, network, alpha=0.001, gamma=0.95, epsilon=0.1, 
+                 epsilon_decay=0.995, epsilon_min=0.01, batch_size=32, 
+                 memory_size=10000, target_update_freq=100, possible_phases=None,
+                 duration_options=None, state_size=None):
         """Initialize AdvancedAgent.
 
         Args:
-            possible_phases: List of possible traffic light phases
-            duration_options: List of possible duration values in seconds
-            state_size: Size of the state vector
+            tls_id: ID of the traffic light this agent controls
+            network: Network object providing access to simulation data
             alpha: Learning rate
             gamma: Discount factor
             epsilon: Exploration rate
@@ -61,19 +73,24 @@ class AdvancedAgent(Agent):
             batch_size: Batch size for learning
             memory_size: Size of experience replay memory
             target_update_freq: Frequency of target network updates
+            possible_phases: List of possible traffic light phases (if None, will be determined from network)
+            duration_options: List of possible duration values in seconds (if None, will use defaults)
+            state_size: Size of the state vector (if None, will use default size)
         """
-        # Note: AdvancedAgent doesn't follow the standard Agent initialization
-        # because it's designed to work with a combined action space
-        self.tls_id = None  # Will be set when assigned to a traffic light
-        self.network = None  # Will be set when assigned to a traffic light
+        # Initialize parent
+        super().__init__(tls_id, network)
 
         # Set device
         self.device = torch.device("cpu")  # Use CPU for consistency
+        
+        # Configure phases and durations
+        self.possible_phases = possible_phases or network.get_possible_phases(tls_id)
+        self.duration_options = duration_options or [5, 10, 15, 20]
+        self.state_size = state_size or 6  # Default state size
 
         # Create combined action space: each action is a tuple (phase, duration)
-        self.action_space = list(itertools.product(possible_phases, duration_options))
+        self.action_space = list(itertools.product(self.possible_phases, self.duration_options))
         self.action_size = len(self.action_space)
-        self.state_size = state_size
 
         # DQN hyperparameters
         self.gamma = gamma
@@ -86,8 +103,8 @@ class AdvancedAgent(Agent):
         self.memory = deque(maxlen=memory_size)
 
         # Initialize networks and move them to the device
-        self.model = AdvancedDQN(state_size, self.action_size).to(self.device)
-        self.target_model = AdvancedDQN(state_size, self.action_size).to(self.device)
+        self.model = AdvancedDQN(self.state_size, self.action_size).to(self.device)
+        self.target_model = AdvancedDQN(self.state_size, self.action_size).to(self.device)
         self.target_model.load_state_dict(self.model.state_dict())
 
         # Optimizer
@@ -100,18 +117,42 @@ class AdvancedAgent(Agent):
         # Track last action for reward calculation
         self.last_action = None
 
-    def set_traffic_light(self, tls_id, network):
-        """Set the traffic light this agent controls.
-
-        This method should be called after construction to associate
-        the agent with a specific traffic light.
-
+    @classmethod
+    def create(cls, tls_id, network, **kwargs):
+        """Create an instance of the AdvancedAgent with proper configuration.
+        
+        This class method handles agent-specific initialization logic.
+        
         Args:
-            tls_id: ID of the traffic light
-            network: Network object
+            tls_id: ID of the traffic light this agent controls
+            network: Network object providing access to simulation data
+            **kwargs: Additional configuration parameters
+            
+        Returns:
+            Properly configured AdvancedAgent instance
         """
-        self.tls_id = tls_id
-        self.network = network
+        # Start with default configuration
+        config = cls.DEFAULT_CONFIG.copy()
+        
+        # Override with provided kwargs
+        config.update(kwargs)
+        
+        # Get agent-specific parameters from network
+        possible_phases = network.get_possible_phases(tls_id)
+        duration_options = [5, 10, 15, 20]  # Default duration options
+        state_size = 6  # Default state size
+        
+        # Create the agent
+        agent = cls(
+            tls_id=tls_id, 
+            network=network,
+            possible_phases=possible_phases,
+            duration_options=duration_options,
+            state_size=state_size,
+            **config
+        )
+        
+        return agent
 
     def choose_action(self, state):
         """Choose an action based on the current state.
