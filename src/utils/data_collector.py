@@ -3,7 +3,7 @@ import os
 import glob
 import threading
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union, Tuple
 import logging
 
 from .observer import Observer
@@ -37,6 +37,10 @@ class DataCollector(Observer):
                 'network': self.network_name,
                 **data
             }
+
+            # Format action for storage if it's a tuple
+            if isinstance(record.get('action'), tuple):
+                record['action'] = str(record['action'])
 
             # Ensure all values are Python native types (not NumPy types)
             for key, value in record.items():
@@ -211,14 +215,26 @@ class NullDataCollector(Observer):
 
 
 class MetricsCalculator:
-    """Helper class to calculate various metrics for the simulation."""
+    """Helper class to calculate metrics for the simulation."""
 
     def __init__(self, network):
         self.network = network
 
-    def calculate_step_metrics(self, tls_id, action, reward):
-        """Calculate metrics for a single step and traffic light."""
+    def calculate_step_metrics(self, tls_id: str, action: Optional[Union[int, Tuple[int, str]]], reward: float) -> Dict[str, Any]:
+        """Calculate metrics for a single step and traffic light.
+        
+        Supports both traditional phase-based and lane-level control actions.
+        
+        Args:
+            tls_id: ID of the traffic light
+            action: Either phase index (int) or link-level action (tuple)
+            reward: Reward received for the action
+            
+        Returns:
+            Dictionary of metrics for the step
+        """
         try:
+            # Calculate standard metrics
             waiting_time = sum(
                 self.network.get_lane_waiting_time(lane)
                 for lane in self.network.get_controlled_lanes(tls_id)
@@ -234,23 +250,37 @@ class MetricsCalculator:
                 for lane in self.network.get_controlled_lanes(tls_id)
             )
 
-            phase_duration = self.network.get_phase_duration(tls_id)
-
-            return {
+            metrics = {
                 'tls_id': tls_id,
-                'action': action,
                 'reward': reward,
                 'waiting_time': waiting_time,
                 'vehicle_count': vehicle_count,
                 'queue_length': queue_length,
-                'phase_duration': phase_duration
             }
+            
+            # For lane-level actions, we need special handling
+            if isinstance(action, tuple) and len(action) == 2 and isinstance(action[0], int) and isinstance(action[1], str):
+                link_index, state = action
+                # Store the action as-is - will be converted to string by DataCollector
+                metrics['action'] = action
+                # For phase duration, use a default value
+                metrics['phase_duration'] = 0.0
+            elif action is None:
+                # Handle None actions (no-ops)
+                metrics['action'] = None
+                metrics['phase_duration'] = 0.0
+            else:
+                # For traditional phase actions, use the standard approach
+                metrics['action'] = action
+                metrics['phase_duration'] = self.network.get_phase_duration(tls_id)
+            
+            return metrics
         except Exception as e:
             logger.error(f"Error calculating metrics for {tls_id}: {str(e)}")
             # Return default metrics to avoid breaking the data collection
             return {
                 'tls_id': tls_id,
-                'action': action if action is not None else 0,
+                'action': str(action) if isinstance(action, tuple) else (action if action is not None else 0),
                 'reward': reward if reward is not None else 0,
                 'waiting_time': 0.0,
                 'vehicle_count': 0,

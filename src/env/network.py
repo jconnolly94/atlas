@@ -2,6 +2,7 @@ import numpy as np
 import traci
 import networkx as nx
 import os
+import warnings
 from typing import List, Dict, Any, Tuple, Optional
 
 from src.utils.network_exporter import NetworkExporter
@@ -10,10 +11,28 @@ from src.utils.network_exporter import NetworkExporter
 class NetworkInterface:
     """Interface for interacting with the traffic network."""
 
-    def get_state(self, tls_id: str) -> np.ndarray:
-        """Get the state vector for a traffic light."""
+    # Lane-level control methods
+    def get_controlled_links(self, tls_id: str) -> List[List[Tuple[str, str, str]]]:
+        """Get links controlled by a traffic light with mapping to lanes."""
         pass
-
+        
+    def get_red_yellow_green_state(self, tls_id: str) -> str:
+        """Get the current signal state string."""
+        pass
+        
+    def set_red_yellow_green_state(self, tls_id: str, state: str) -> None:
+        """Set the signal state for a traffic light."""
+        pass
+        
+    def change_specific_link(self, tls_id: str, link_index: int, new_state: str) -> Any:
+        """Change the state of a specific link while maintaining minimal safety constraints."""
+        pass
+        
+    def get_link_metrics(self, tls_id: str) -> List[Dict[str, Any]]:
+        """Get performance metrics for each link controlled by a traffic light."""
+        pass
+    
+    # Lane metrics
     def get_controlled_lanes(self, tls_id: str) -> List[str]:
         """Get lanes controlled by a traffic light."""
         pass
@@ -29,21 +48,31 @@ class NetworkInterface:
     def get_lane_queue(self, lane_id: str) -> int:
         """Get queue length for a lane."""
         pass
-
+    
+    # Deprecated phase-based methods (maintained for backward compatibility)
     def get_phase_duration(self, tls_id: str) -> float:
-        """Get phase duration for a traffic light."""
+        """Get phase duration for a traffic light. (Deprecated: Use lane-level control instead)"""
+        warnings.warn("get_phase_duration is deprecated. Use lane-level control methods instead.", DeprecationWarning)
         pass
 
     def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
-        """Set phase for a traffic light."""
+        """Set phase for a traffic light. (Deprecated: Use lane-level control instead)"""
+        warnings.warn("set_traffic_light_phase is deprecated. Use lane-level control methods instead.", DeprecationWarning)
         pass
 
     def set_phase_duration(self, tls_id: str, duration: float) -> None:
-        """Set phase duration for a traffic light."""
+        """Set phase duration for a traffic light. (Deprecated: Use lane-level control instead)"""
+        warnings.warn("set_phase_duration is deprecated. Use lane-level control methods instead.", DeprecationWarning)
         pass
 
     def get_current_phase(self, tls_id: str) -> int:
-        """Get the current phase of a traffic light."""
+        """Get the current phase of a traffic light. (Deprecated: Use lane-level control instead)"""
+        warnings.warn("get_current_phase is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        pass
+        
+    def get_possible_phases(self, tls_id: str) -> List[int]:
+        """Get possible phases for a traffic light. (Deprecated: Use lane-level control instead)"""
+        warnings.warn("get_possible_phases is deprecated. Use lane-level control methods instead.", DeprecationWarning)
         pass
 
 
@@ -138,7 +167,16 @@ class Network(NetworkInterface):
         return max(0, step_waiting)  # Prevent negative values
 
     def get_state(self) -> Dict[str, np.ndarray]:
-        """Get state vectors for all traffic lights."""
+        """Get state vectors for all traffic lights.
+        
+        Note: This method is used primarily for backward compatibility.
+        New code should use get_link_metrics for lane-level state representation.
+        """
+        warnings.warn(
+            "get_state is deprecated. Use get_link_metrics for lane-level state representation.", 
+            DeprecationWarning
+        )
+        
         states = {}
 
         for tls_id in self.tls_ids:
@@ -159,7 +197,7 @@ class Network(NetworkInterface):
 
         return states
 
-    # Implementation of interface methods
+    # Lane metrics implementation
 
     def get_controlled_lanes(self, tls_id: str) -> List[str]:
         """Get lanes controlled by a traffic light."""
@@ -177,41 +215,198 @@ class Network(NetworkInterface):
         """Get queue length for a lane."""
         return traci.lane.getLastStepHaltingNumber(lane_id)
 
-    def get_phase_duration(self, tls_id: str) -> float:
-        """Get phase duration for a traffic light."""
-        return traci.trafficlight.getPhaseDuration(tls_id)
-
-    def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
-        """Set phase for a traffic light."""
-        traci.trafficlight.setPhase(tls_id, phase)
-
-    def set_phase_duration(self, tls_id: str, duration: float) -> None:
-        """Set phase duration for a traffic light."""
-        traci.trafficlight.setPhaseDuration(tls_id, duration)
-
-    def get_current_phase(self, tls_id: str) -> int:
-        """Get the current phase of a traffic light.
-
+    # Lane-level control implementation
+    
+    def get_controlled_links(self, tls_id: str) -> List[List[Tuple[str, str, str]]]:
+        """Get links controlled by a traffic light with mapping to lanes.
+        
         Args:
             tls_id: ID of the traffic light
-
+            
         Returns:
-            Current phase index
+            List of links, where each link is a tuple of (fromLane, toLane, internalLane)
         """
         try:
-            return traci.trafficlight.getPhase(tls_id)
+            return traci.trafficlight.getControlledLinks(tls_id)
         except traci.exceptions.TraCIException as e:
-            print(f"Warning: Could not get current phase for {tls_id}: {e}")
-            return 0
+            print(f"Warning: Could not get controlled links for {tls_id}: {e}")
+            return []
 
-    def get_possible_phases(self, tls_id: str) -> List[int]:
-        """Get possible phases for a traffic light."""
-        logics = traci.trafficlight.getAllProgramLogics(tls_id)
+    def get_red_yellow_green_state(self, tls_id: str) -> str:
+        """Get the current signal state string.
+        
+        Args:
+            tls_id: ID of the traffic light
+            
+        Returns:
+            Current signal state string (e.g., "GrGr")
+        """
+        try:
+            return traci.trafficlight.getRedYellowGreenState(tls_id)
+        except traci.exceptions.TraCIException as e:
+            print(f"Warning: Could not get RYG state for {tls_id}: {e}")
+            return ""
 
-        if not logics:
-            raise RuntimeError(f"No program logics found for traffic light '{tls_id}'")
+    def set_red_yellow_green_state(self, tls_id: str, state: str) -> None:
+        """Set the signal state for a traffic light.
+        
+        Args:
+            tls_id: ID of the traffic light
+            state: Signal state string (e.g., "GrGr")
+        """
+        try:
+            traci.trafficlight.setRedYellowGreenState(tls_id, state)
+        except traci.exceptions.TraCIException as e:
+            print(f"Warning: Could not set RYG state for {tls_id}: {e}")
 
-        return list(range(len(logics[0].phases)))
+    def change_specific_link(self, tls_id: str, link_index: int, new_state: str) -> Any:
+        """Change the state of a specific link while maintaining minimal safety constraints.
+        
+        Args:
+            tls_id: ID of the traffic light
+            link_index: Index of the link to change
+            new_state: New state for the link ('G', 'g', 'r', 'R', 'y', 'Y', etc.)
+            
+        Returns:
+            Result of the state change:
+                - True if the change was applied immediately
+                - Dictionary with followup information if a yellow transition is required
+                - False if no change was made or if a conflict was detected
+        """
+        current_state = self.get_red_yellow_green_state(tls_id)
+        if not current_state:  # Empty string indicates error
+            print(f"Warning: Cannot change link state - no current state for {tls_id}")
+            return False
+            
+        state_list = list(current_state)
+        
+        # Ensure link_index is within bounds
+        if link_index < 0 or link_index >= len(state_list):
+            print(f"Warning: Link index {link_index} out of bounds for traffic light {tls_id}")
+            return False
+            
+        current_link_state = state_list[link_index]
+        
+        # Only update if the state is actually changing
+        if current_link_state != new_state:
+            # Handle green → red transition (must have yellow phase)
+            if current_link_state in 'Gg' and new_state in 'Rr':
+                state_list[link_index] = 'y'
+                intermediate_state = ''.join(state_list)
+                self.set_red_yellow_green_state(tls_id, intermediate_state)
+                
+                # Schedule the change to red after an appropriate yellow time
+                return {'needs_followup': True, 'next_state': 'r', 'link_index': link_index}
+            else:
+                # For any other transition
+                state_list[link_index] = new_state
+                proposed_state = ''.join(state_list)
+                
+                # Apply safety check if setting to green
+                if new_state in 'Gg' and self.check_physical_conflicts(tls_id, proposed_state):
+                    return False  # Conflict detected, don't apply
+                
+                # Apply the change
+                self.set_red_yellow_green_state(tls_id, proposed_state)
+                return True
+        
+        return False  # No change needed
+
+    def check_physical_conflicts(self, tls_id: str, proposed_state: str) -> bool:
+        """Check if the proposed signal state has physical conflicts.
+        
+        Args:
+            tls_id: ID of the traffic light
+            proposed_state: Proposed signal state string
+            
+        Returns:
+            True if conflicts are detected, False otherwise
+        """
+        # Get information about the junction topology
+        links = self.get_controlled_links(tls_id)
+        if not links:  # Empty list indicates error
+            print(f"Warning: Cannot check physical conflicts - no links for {tls_id}")
+            return False
+        
+        # Find links that would be green in the proposed state
+        green_links = [i for i, c in enumerate(proposed_state) if c in 'Gg']
+        
+        # Check for conflicting movements (simplified)
+        # For safety, we'll only allow orthogonal movements to be green at the same time
+        for i in green_links:
+            for j in green_links:
+                if i != j and i < len(links) and j < len(links) and links[i] and links[j]:
+                    # Use a simple check for conflicts
+                    if self._simple_conflict_check(links[i][0], links[j][0]):
+                        return True
+        
+        return False
+
+    def _simple_conflict_check(self, link1: Tuple[str, str, str], link2: Tuple[str, str, str]) -> bool:
+        """Fallback check for conflicts when geometric data is unavailable.
+        
+        Args:
+            link1: First link as (fromLane, toLane, internalLane)
+            link2: Second link as (fromLane, toLane, internalLane)
+            
+        Returns:
+            True if the links likely conflict, False otherwise
+        """
+        # Get from and to edges
+        try:
+            from_edge1 = link1[0].split('_')[0]
+            to_edge1 = link1[1].split('_')[0]
+            from_edge2 = link2[0].split('_')[0]
+            to_edge2 = link2[1].split('_')[0]
+            
+            # Check for crossing paths (from different directions to different directions)
+            if from_edge1 != from_edge2 and to_edge1 != to_edge2:
+                return True
+            
+            # Same destination is a conflict
+            if to_edge1 == to_edge2:
+                return True
+        except Exception as e:
+            print(f"Warning: Error in simple conflict check: {e}")
+            return True  # Safer to assume conflict if error
+        
+        return False
+
+    def get_link_metrics(self, tls_id: str) -> List[Dict[str, Any]]:
+        """Get performance metrics for each link controlled by a traffic light.
+        
+        Args:
+            tls_id: ID of the traffic light
+            
+        Returns:
+            List of dictionaries with metrics for each link
+        """
+        links = self.get_controlled_links(tls_id)
+        if not links:  # Empty list indicates error
+            print(f"Warning: Cannot get link metrics - no links for {tls_id}")
+            return []
+            
+        link_metrics = []
+        
+        for i, link_group in enumerate(links):
+            if not link_group:  # Skip empty links
+                continue
+                
+            try:
+                link = link_group[0]  # Take the first link in the group
+                from_lane = link[0]
+                
+                link_metrics.append({
+                    'index': i,
+                    'from_lane': from_lane,
+                    'waiting_time': self.get_lane_waiting_time(from_lane),
+                    'vehicle_count': self.get_lane_vehicle_count(from_lane),
+                    'queue_length': self.get_lane_queue(from_lane)
+                })
+            except Exception as e:
+                print(f"Warning: Error getting metrics for link {i} of {tls_id}: {e}")
+        
+        return link_metrics
         
     def get_adjacent_traffic_lights(self, tls_id: str) -> List[str]:
         """Determine adjacent traffic lights based on network topology.
@@ -271,6 +466,63 @@ class Network(NetworkInterface):
         adjacent_tls = other_tls[:min(2, len(other_tls))]
         
         return adjacent_tls
+
+    # Deprecated phase-based methods (maintained for backward compatibility)
+
+    def get_phase_duration(self, tls_id: str) -> float:
+        """Get phase duration for a traffic light.
+        
+        Deprecated: Use lane-level control instead.
+        """
+        warnings.warn("get_phase_duration is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        return traci.trafficlight.getPhaseDuration(tls_id)
+
+    def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
+        """Set phase for a traffic light.
+        
+        Deprecated: Use lane-level control instead.
+        """
+        warnings.warn("set_traffic_light_phase is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        traci.trafficlight.setPhase(tls_id, phase)
+
+    def set_phase_duration(self, tls_id: str, duration: float) -> None:
+        """Set phase duration for a traffic light.
+        
+        Deprecated: Use lane-level control instead.
+        """
+        warnings.warn("set_phase_duration is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        traci.trafficlight.setPhaseDuration(tls_id, duration)
+
+    def get_current_phase(self, tls_id: str) -> int:
+        """Get the current phase of a traffic light.
+        
+        Deprecated: Use lane-level control instead.
+
+        Args:
+            tls_id: ID of the traffic light
+
+        Returns:
+            Current phase index
+        """
+        warnings.warn("get_current_phase is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        try:
+            return traci.trafficlight.getPhase(tls_id)
+        except traci.exceptions.TraCIException as e:
+            print(f"Warning: Could not get current phase for {tls_id}: {e}")
+            return 0
+
+    def get_possible_phases(self, tls_id: str) -> List[int]:
+        """Get possible phases for a traffic light.
+        
+        Deprecated: Use lane-level control instead.
+        """
+        warnings.warn("get_possible_phases is deprecated. Use lane-level control methods instead.", DeprecationWarning)
+        logics = traci.trafficlight.getAllProgramLogics(tls_id)
+
+        if not logics:
+            raise RuntimeError(f"No program logics found for traffic light '{tls_id}'")
+
+        return list(range(len(logics[0].phases)))
 
     # Simulation management methods
 
@@ -360,7 +612,3 @@ class Network(NetworkInterface):
     def get_current_time(self) -> float:
         """Get current simulation time."""
         return traci.simulation.getTime()
-
-    def get_phase_description(self, tls_id: str) -> str:
-        """Get phase description for a traffic light."""
-        return traci.trafficlight.getRedYellowGreenState(tls_id)

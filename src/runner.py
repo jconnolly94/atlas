@@ -32,8 +32,8 @@ class Runner:
             ("RoxboroArea", "../Networks/RoxboroArea/RoxboroArea.sumocfg"),
         ]
         self.available_agents = [
-            "Q-Learning",
-            "DQN",
+            "Q-Learning",  # Using lane-level control by default
+            "DQN",         # Using lane-level control by default
             "Advanced",
             "Enhanced",
             "Baseline"
@@ -69,7 +69,7 @@ class Runner:
         for idx, (name, path) in enumerate(self.available_networks, 1):
             self.console.print(f"  {idx}. {name} ([dim]{path}[/dim])")
 
-        net_choice = int(input("\nSelect network (1-2): ")) - 1
+        net_choice = int(input("\nSelect network (1-3): ")) - 1
         return self.available_networks[net_choice]
 
     def select_agents(self):
@@ -81,7 +81,12 @@ class Runner:
         self.console.print("\n[green]Available Agents:")
 
         for idx, name in enumerate(self.available_agents, 1):
-            self.console.print(f"  {idx}. {name}")
+            # Add description that all agents use lane-level control
+            description = ""
+            if name in ["Q-Learning", "DQN"]:
+                description = " (using lane-level control)"
+            
+            self.console.print(f"  {idx}. {name}{description}")
 
         agent_choices = input("Select agents (comma-separated, e.g. 1,3,4): ")
         return [self.available_agents[int(c) - 1] for c in agent_choices.split(",")]

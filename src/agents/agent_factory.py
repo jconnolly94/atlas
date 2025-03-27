@@ -10,20 +10,30 @@ from .no_agent import NoAgent
 
 
 class AgentFactory:
-    """Factory for creating agents with different configurations.
-    
-    Simplified to focus purely on agent instantiation without specific knowledge
-    about agent configuration. Each agent is responsible for its own configuration.
-    """
+    """Factory for creating agents with different configurations."""
 
     def __init__(self):
         """Initialize the agent factory."""
         self.agent_types = {
             "Q-Learning": QAgent,
             "DQN": DQNAgent,
-            "Advanced": AdvancedAgent,
+            "Advanced": AdvancedAgent, 
             "Enhanced": EnhancedAgent,
             "Baseline": NoAgent
+        }
+        
+        # Default configurations for specific agent types
+        self.agent_configs = {
+            "Q-Learning": {
+                "epsilon": 0.8,              # High exploration rate
+                "epsilon_decay": 0.998,      # Slower decay for more exploration
+                "min_epsilon": 0.15         # Higher minimum exploration
+            },
+            "DQN": {
+                "epsilon": 0.9,              # Very high exploration rate
+                "epsilon_decay": 0.9999,     # Very slow decay for exploration
+                "epsilon_min": 0.2           # Higher minimum for exploration
+            }
         }
 
     def create_agent(self, agent_type: str, tls_id: str, network, **kwargs) -> Agent:
@@ -47,8 +57,13 @@ class AgentFactory:
         # Get agent class
         agent_class = self.agent_types[agent_type]
         
+        # Apply default configuration if available
+        config = kwargs.copy()
+        if agent_type in self.agent_configs:
+            config.update(self.agent_configs[agent_type])
+        
         # Let each agent configure itself
-        return agent_class.create(tls_id, network, **kwargs)
+        return agent_class.create(tls_id, network, **config)
 
     def create_agents_for_network(self, agent_type: str, network) -> Dict[str, Agent]:
         """Create agents for all traffic lights in a network.
@@ -72,7 +87,7 @@ class AgentFactory:
 agent_factory = AgentFactory()
 
 
-# Helper functions for backward compatibility
+# Helper functions for agent creation
 def create_q_agent(tls_id, network, **kwargs):
     return agent_factory.create_agent("Q-Learning", tls_id, network, **kwargs)
 
