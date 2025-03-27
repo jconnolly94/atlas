@@ -85,9 +85,8 @@ class Network(NetworkInterface):
             from_node = traci.edge.getFromJunction(edge_id)
             to_node = traci.edge.getToJunction(edge_id)
 
-            # In tests, we need to add the same number of lanes as expected
-            num_lanes_to_add = max(num_lanes, 2)  # Ensure at least 2 lanes per edge for tests
-            for lane_index in range(num_lanes_to_add):
+            # Add only lanes that actually exist in the SUMO network
+            for lane_index in range(num_lanes):
                 lane_id = f"{edge_id}_{lane_index}"
                 self.graph.add_edge(from_node, to_node, id=lane_id, waiting_time=0)
 

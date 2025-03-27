@@ -28,7 +28,8 @@ class Runner:
         self.console = Console()
         self.available_networks = [
             ("Simple4wayCross", "../Networks/Simple4wayCross/simpleCross.sumocfg"),
-            ("DublinRd", "../Networks/DublinRd/DublinRd.sumocfg")
+            ("DublinRd", "../Networks/DublinRd/DublinRd.sumocfg"),
+            ("RoxboroArea", "../Networks/RoxboroArea/RoxboroArea.sumocfg"),
         ]
         self.available_agents = [
             "Q-Learning",
