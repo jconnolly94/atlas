@@ -320,25 +320,6 @@ class Runner:
         # Display results
         self.display_results(results)
 
-        # Combine data
-        if results:
-            try:
-                self.console.print("[yellow]Combining results from all workers...")
-
-                # Ensure paths exist
-                os.makedirs('data/datastore/steps', exist_ok=True)
-                os.makedirs('data/datastore/episodes', exist_ok=True)
-
-                # Import here to avoid circular imports
-                from utils.data_collector import DataCollector
-                DataCollector.combine_results()
-                self.console.print("[green]Results combined successfully!")
-            except Exception as e:
-                self.console.print(f"[red]Error combining results: {str(e)}")
-                traceback.print_exc()
-        else:
-            self.console.print("[yellow]No results to combine.")
-
     def monitor_progress(self, processes, progress_flags, agent_types, total_episodes):
         """Monitor progress with a simplified approach to avoid broken pipe errors.
 
