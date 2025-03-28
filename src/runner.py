@@ -4,7 +4,7 @@ import random
 from tqdm import tqdm
 from rich.console import Console
 from rich.table import Table
-from multiprocessing import Process, Manager
+from multiprocessing import Process, Manager, Queue
 import traceback
 import logging
 import numpy as np
@@ -142,6 +142,20 @@ class Runner:
                     'completed': False,
                     'error': False
                 })
+            
+            # Create shared data queue
+            data_queue = manager.Queue()
+            
+            # Placeholder paths - will be dynamic later
+            step_file_path = 'temp_step_data.parquet'
+            episode_file_path = 'temp_episode_data.parquet'
+            
+            # Create and start writer process
+            writer_proc = Process(
+                target=data_writer_process,  # Assume this function is defined elsewhere
+                args=(data_queue, step_file_path, episode_file_path)
+            )
+            writer_proc.start()
 
             processes = []
 
@@ -162,7 +176,8 @@ class Runner:
                         num_episodes,
                         use_gui,
                         shared_results,
-                        progress_flags[agent_type]  # Pass individual agent progress dict
+                        progress_flags[agent_type],  # Pass individual agent progress dict
+                        data_queue  # Pass the shared data queue to the worker
                     )
                 )
                 processes.append(p)
@@ -179,6 +194,12 @@ class Runner:
             # Wait for all processes to complete
             for p in processes:
                 p.join()
+                
+            # Signal writer shutdown with sentinel value
+            data_queue.put(None)
+            
+            # Join writer process
+            writer_proc.join()
 
             # Convert results
             results = list(shared_results)
@@ -302,7 +323,7 @@ class Runner:
         self.console.print(table)
 
     @staticmethod
-    def worker_process(config, agent_type, port_range, num_episodes, use_gui, shared_results, progress_dict):
+    def worker_process(config, agent_type, port_range, num_episodes, use_gui, shared_results, progress_dict, data_queue):
         """Worker process for running a single experiment.
 
         Args:
@@ -313,6 +334,7 @@ class Runner:
             use_gui: Whether to use the SUMO GUI
             shared_results: Shared list for collecting results
             progress_dict: Dictionary for tracking this agent's progress
+            data_queue: Shared queue for data collection
         """
         try:
             # Generate worker ID
