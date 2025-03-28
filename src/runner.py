@@ -8,6 +8,10 @@ from multiprocessing import Process, Manager, Queue
 import traceback
 import logging
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pandas as pd
+from typing import Dict, Any, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -16,6 +20,115 @@ logging.basicConfig(
     filename='runner.log'
 )
 logger = logging.getLogger('Runner')
+
+
+def data_writer_process(queue, step_file_path, episode_file_path):
+    """
+    Process that reads data dictionaries from a shared queue and writes them to Parquet files.
+    
+    Args:
+        queue: A multiprocessing Queue for receiving data dictionaries
+        step_file_path: Path where step data will be saved as Parquet
+        episode_file_path: Path where episode data will be saved as Parquet
+    """
+    logger = logging.getLogger('DataWriter')
+    
+    # Define schemas for step and episode data
+    step_schema = pa.schema([
+        pa.field('agent_type', pa.string()),
+        pa.field('network', pa.string()),
+        pa.field('episode', pa.int64()),
+        pa.field('step', pa.int64()),
+        pa.field('tls_id', pa.string()),
+        pa.field('action', pa.string()),  # Action stored as string representation
+        pa.field('reward', pa.float64()),
+        pa.field('waiting_time', pa.float64()),
+    ])
+    
+    episode_schema = pa.schema([
+        pa.field('agent_type', pa.string()),
+        pa.field('network', pa.string()),
+        pa.field('episode', pa.int64()),
+        pa.field('avg_waiting', pa.float64()),
+        pa.field('total_reward', pa.float64()),
+    ])
+    
+    # Ensure output directories exist
+    os.makedirs(os.path.dirname(step_file_path), exist_ok=True)
+    os.makedirs(os.path.dirname(episode_file_path), exist_ok=True)
+    
+    # Initialize Parquet writers
+    step_writer = None
+    episode_writer = None
+    
+    try:
+        step_writer = pq.ParquetWriter(step_file_path, step_schema)
+        episode_writer = pq.ParquetWriter(episode_file_path, episode_schema)
+        logger.info(f"Parquet writers opened for {step_file_path} and {episode_file_path}")
+        
+        # Main processing loop
+        while True:
+            try:
+                # Get next item from queue
+                item = queue.get()
+                
+                # Check for sentinel value
+                if item is None:
+                    logger.info("Received sentinel. Shutting down writer.")
+                    break
+                
+                # Validate item is a dictionary
+                if not isinstance(item, dict):
+                    logger.warning(f"Received non-dict item: {item}")
+                    continue
+                
+                # Determine item type
+                item_type = item.pop('type', None)
+                
+                if item_type is None:
+                    logger.warning(f"Item missing 'type' field: {item}")
+                    continue
+                
+                # Process based on item type
+                try:
+                    if item_type == 'step':
+                        # Convert dict to DataFrame
+                        df = pd.DataFrame([item])
+                        
+                        # Convert DataFrame to PyArrow Table with schema
+                        table = pa.Table.from_pandas(df, schema=step_schema)
+                        
+                        # Write to Parquet file
+                        step_writer.write_table(table)
+                        
+                    elif item_type == 'episode':
+                        # Convert dict to DataFrame
+                        df = pd.DataFrame([item])
+                        
+                        # Convert DataFrame to PyArrow Table with schema
+                        table = pa.Table.from_pandas(df, schema=episode_schema)
+                        
+                        # Write to Parquet file
+                        episode_writer.write_table(table)
+                        
+                    else:
+                        logger.warning(f"Unknown item type: {item_type}")
+                        
+                except Exception as e:
+                    logger.error(f"Error processing {item_type} data: {e}")
+                    
+            except Exception as e:
+                logger.error(f"Error in data writer process: {e}")
+                
+    finally:
+        # Clean up resources
+        if step_writer:
+            step_writer.close()
+            logger.info("Step data Parquet writer closed.")
+            
+        if episode_writer:
+            episode_writer.close()
+            logger.info("Episode data Parquet writer closed.")
 
 
 class Runner:
