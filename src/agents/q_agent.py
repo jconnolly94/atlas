@@ -4,6 +4,14 @@ import random
 import numpy as np
 from collections import defaultdict
 from typing import Dict, Any, Tuple, List, Optional, Union
+# Add necessary imports for state persistence
+import os
+import pickle
+import json
+import logging
+
+# Configure logger
+q_agent_logger = logging.getLogger(__name__)
 
 
 class QAgent(Agent):
@@ -306,3 +314,99 @@ class QAgent(Agent):
         }
         
         return total_reward, components
+
+    def save_state(self, directory_path: str):
+        """Saves the Q-agent's state (Q-table and hyperparameters) to the specified directory."""
+        try:
+            super().save_state(directory_path) # Ensure directory exists via base class call if it does that
+        except AttributeError: # If Agent base class doesn't have save_state (it should)
+             os.makedirs(directory_path, exist_ok=True) # Manually ensure dir exists
+
+        q_table_path = os.path.join(directory_path, 'q_table.pkl')
+        hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        q_agent_logger.info(f"Attempting to save QAgent state to {directory_path}")
+
+        try:
+            # Save Q-table (convert defaultdict to dict for potentially better compatibility)
+            # Important: Ensure self.q_values exists and is populated correctly before saving
+            if hasattr(self, 'q_values') and self.q_values:
+                 q_values_dict = dict(self.q_values)
+                 # Further convert inner defaultdicts if they exist
+                 for k, inner_dd in q_values_dict.items():
+                     if isinstance(inner_dd, defaultdict):
+                         q_values_dict[k] = dict(inner_dd)
+
+                 with open(q_table_path, 'wb') as f:
+                    pickle.dump(q_values_dict, f)
+            else:
+                 q_agent_logger.warning("Q-table ('q_values') is empty or missing, skipping save.")
+                 # Optionally save an empty file or handle differently if needed
+
+
+            # Save hyperparameters
+            hyperparams = {
+                'epsilon': getattr(self, 'epsilon', None), # Use getattr for safety
+                'alpha': getattr(self, 'alpha', None),
+                'gamma': getattr(self, 'gamma', None),
+                'epsilon_decay': getattr(self, 'epsilon_decay', None),
+                'min_epsilon': getattr(self, 'min_epsilon', None)
+                # Add any other relevant state variables specific to QAgent
+            }
+            with open(hyperparams_path, 'w') as f:
+                json.dump(hyperparams, f, indent=4)
+            q_agent_logger.info(f"QAgent state saved successfully to {directory_path}")
+
+        except Exception as e:
+            q_agent_logger.error(f"Error saving QAgent state to {directory_path}: {e}", exc_info=True) # Log traceback
+
+
+    def load_state(self, directory_path: str):
+        """Loads the Q-agent's state (Q-table and hyperparameters) from the specified directory."""
+        q_table_path = os.path.join(directory_path, 'q_table.pkl')
+        hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        q_agent_logger.info(f"Attempting to load QAgent state from {directory_path}")
+
+        # Check if required files exist
+        if not os.path.exists(q_table_path):
+            q_agent_logger.warning(f"Cannot load QAgent state: Q-table file not found at {q_table_path}")
+            return # Don't attempt partial load if essential Q-table is missing
+        if not os.path.exists(hyperparams_path):
+             q_agent_logger.warning(f"Cannot load QAgent state: Hyperparameters file not found at {hyperparams_path}")
+             # Decide if loading only Q-table is acceptable or return here too.
+             # For consistency, let's return if hyperparams are also missing.
+             return
+
+        try:
+            # Load Q-table
+            with open(q_table_path, 'rb') as f:
+                loaded_dict = pickle.load(f)
+                # Restore to nested defaultdict structure
+                # Assumes the structure is state_key -> action_key -> q_value (float)
+                self.q_values = defaultdict(lambda: defaultdict(float))
+                for state_key, action_dict in loaded_dict.items():
+                    inner_dd = defaultdict(float)
+                    if isinstance(action_dict, dict): # Check if inner part is a dict
+                        inner_dd.update(action_dict)
+                    self.q_values[state_key] = inner_dd
+
+
+            # Load hyperparameters
+            with open(hyperparams_path, 'r') as f:
+                hyperparams = json.load(f)
+                # Use loaded values, falling back to existing values if key is missing in JSON
+                self.epsilon = hyperparams.get('epsilon', getattr(self, 'epsilon', 0.1)) # Provide default for getattr too
+                self.alpha = hyperparams.get('alpha', getattr(self, 'alpha', 0.1))
+                self.gamma = hyperparams.get('gamma', getattr(self, 'gamma', 0.9))
+                self.epsilon_decay = hyperparams.get('epsilon_decay', getattr(self, 'epsilon_decay', 0.995))
+                self.min_epsilon = hyperparams.get('min_epsilon', getattr(self, 'min_epsilon', 0.1))
+                # Load any other saved parameters
+
+            q_agent_logger.info(f"QAgent state loaded successfully from {directory_path}")
+
+        except FileNotFoundError:
+             # This case should ideally be caught by the checks above, but handle defensively
+             q_agent_logger.error(f"Error loading QAgent state: File not found during load attempt in {directory_path}")
+        except Exception as e:
+            q_agent_logger.error(f"Error loading QAgent state from {directory_path}: {e}", exc_info=True) # Log traceback
+            # Consider re-initializing q_values to a default state if loading fails critically
+            # self.q_values = defaultdict(lambda: defaultdict(float))

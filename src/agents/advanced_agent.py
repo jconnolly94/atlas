@@ -4,10 +4,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import os
+import json
+import pickle
+import logging
 from collections import deque, defaultdict
 from typing import Dict, Any, Tuple, Optional, List, Union
 
 from .agent import Agent
+
+# Configure logger for this module
+adv_logger = logging.getLogger(__name__) # Use __name__
 
 
 class AdvancedLinkEncoder(nn.Module):
