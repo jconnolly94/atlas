@@ -3,10 +3,16 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
+import os
+import json
+import logging
 from collections import deque, defaultdict
 from typing import Dict, Any, Tuple, Optional, List, Union
 
 from .agent import Agent
+
+# Configure logger for this module
+dqn_logger = logging.getLogger(__name__) # Use __name__ for module-level logger
 
 
 class DQNLinkEncoder(nn.Module):
@@ -428,6 +434,144 @@ class DQNAgent(Agent):
         # Store last action for learning
         self.last_action = action
         return action
+        
+    def save_state(self, directory_path: str):
+        """Saves the DQN agent's state (models, optimizer, hyperparameters) to the specified directory."""
+        try:
+            # Ensure directory exists using the base class method if available, else create manually
+            if hasattr(super(), 'save_state') and callable(super().save_state):
+                 super().save_state(directory_path)
+            else:
+                 os.makedirs(directory_path, exist_ok=True)
+            dqn_logger.info(f"Ensured directory exists: {directory_path}")
+        except Exception as e:
+            dqn_logger.error(f"Error ensuring directory exists {directory_path}: {e}", exc_info=True)
+            return # Cannot proceed if directory cannot be created/accessed
+
+        model_path = os.path.join(directory_path, 'model.pth')
+        target_model_path = os.path.join(directory_path, 'target_model.pth')
+        optimizer_path = os.path.join(directory_path, 'optimizer.pth')
+        hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        dqn_logger.info(f"Attempting to save DQNAgent state for {self.tls_id} to {directory_path}")
+
+        try:
+            # Save state dictionaries
+            if hasattr(self, 'model') and self.model:
+                torch.save(self.model.state_dict(), model_path)
+            else:
+                 dqn_logger.warning("Attribute 'model' not found or is None. Skipping save.")
+
+            if hasattr(self, 'target_model') and self.target_model:
+                torch.save(self.target_model.state_dict(), target_model_path)
+            else:
+                dqn_logger.warning("Attribute 'target_model' not found or is None. Skipping save.")
+
+            if hasattr(self, 'optimizer') and self.optimizer:
+                torch.save(self.optimizer.state_dict(), optimizer_path)
+            else:
+                dqn_logger.warning("Attribute 'optimizer' not found or is None. Skipping save.")
+
+            # Save hyperparameters
+            hyperparams = {
+                'epsilon': getattr(self, 'epsilon', None),
+                'gamma': getattr(self, 'gamma', None),
+                'train_step': getattr(self, 'train_step', 0),
+                'epsilon_decay': getattr(self, 'epsilon_decay', None),
+                'epsilon_min': getattr(self, 'epsilon_min', None),
+                'batch_size': getattr(self, 'batch_size', None),
+                'memory_size': getattr(self, 'memory', None).maxlen if hasattr(self, 'memory') and hasattr(self.memory, 'maxlen') else None, # Save intended size
+                'target_update_freq': getattr(self, 'target_update_freq', None),
+                # Add other hyperparameters defined in __init__ or config
+            }
+            with open(hyperparams_path, 'w') as f:
+                json.dump(hyperparams, f, indent=4)
+
+            dqn_logger.info(f"DQNAgent state for {self.tls_id} saved successfully to {directory_path}")
+
+        except Exception as e:
+            dqn_logger.error(f"Error saving DQNAgent state for {self.tls_id} to {directory_path}: {e}", exc_info=True)
+            
+    def load_state(self, directory_path: str):
+        """Loads the DQN agent's state (models, optimizer, hyperparameters) from the specified directory."""
+        model_path = os.path.join(directory_path, 'model.pth')
+        target_model_path = os.path.join(directory_path, 'target_model.pth')
+        optimizer_path = os.path.join(directory_path, 'optimizer.pth')
+        hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        dqn_logger.info(f"Attempting to load DQNAgent state for {self.tls_id} from {directory_path}")
+
+        # Check if essential files exist
+        required_files = [model_path, target_model_path, optimizer_path, hyperparams_path]
+        if not all(os.path.exists(p) for p in required_files):
+            dqn_logger.warning(f"Cannot load DQNAgent state for {self.tls_id}: Required file(s) not found in {directory_path}")
+            return # Do not attempt partial load
+
+        try:
+            # Determine device
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            dqn_logger.info(f"Loading state onto device: {device}")
+
+            # --- Load Models ---
+            # Ensure models are instantiated BEFORE loading state
+            if not hasattr(self, 'model') or not self.model:
+                 dqn_logger.error("Model not initialized before loading state. Cannot proceed.")
+                 return
+            if not hasattr(self, 'target_model') or not self.target_model:
+                 dqn_logger.error("Target model not initialized before loading state. Cannot proceed.")
+                 return
+
+            self.model.load_state_dict(torch.load(model_path, map_location=device))
+            self.target_model.load_state_dict(torch.load(target_model_path, map_location=device))
+            self.model.to(device) # Move model to correct device
+            self.target_model.to(device)
+
+            # --- Load Optimizer ---
+            # Ensure optimizer is initialized BEFORE loading state
+            if not hasattr(self, 'optimizer') or not self.optimizer:
+                 dqn_logger.error("Optimizer not initialized before loading state. Re-initializing.")
+                 # Re-initialize optimizer (requires learning rate from hyperparams or default)
+                 # This assumes self.model.parameters() are now correctly loaded and on the right device
+                 default_lr = 0.001 # Or get from config
+                 self.optimizer = optim.Adam(self.model.parameters(), lr=default_lr)
+                 # Load state into the newly created optimizer
+                 self.optimizer.load_state_dict(torch.load(optimizer_path)) # Now load the state
+            else:
+                 # If optimizer exists, just load the state.
+                 # NOTE: This might cause issues if the model parameters changed device *after*
+                 # the optimizer was initially created but before saving. Re-initializing is often safer.
+                 try:
+                     self.optimizer.load_state_dict(torch.load(optimizer_path))
+                 except Exception as opt_load_err:
+                      dqn_logger.error(f"Failed loading optimizer state dict, re-initializing optimizer: {opt_load_err}")
+                      # Re-initialize as fallback
+                      lr = getattr(self, 'alpha', 0.001) # Try to get loaded alpha if possible
+                      self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+                      self.optimizer.load_state_dict(torch.load(optimizer_path)) # Retry loading state
+
+
+            # --- Load Hyperparameters ---
+            with open(hyperparams_path, 'r') as f:
+                hyperparams = json.load(f)
+                # Use loaded values, falling back to existing values if key is missing in JSON
+                self.epsilon = hyperparams.get('epsilon', getattr(self, 'epsilon', 0.1))
+                self.gamma = hyperparams.get('gamma', getattr(self, 'gamma', 0.95))
+                self.train_step = hyperparams.get('train_step', getattr(self, 'train_step', 0))
+                self.epsilon_decay = hyperparams.get('epsilon_decay', getattr(self, 'epsilon_decay', 0.9999))
+                self.epsilon_min = hyperparams.get('epsilon_min', getattr(self, 'epsilon_min', 0.1))
+                # Reload config-related params if they influence behavior (batch_size, target_update_freq)
+                # Note: Memory size isn't reloaded here as we are not loading the buffer itself,
+                # but the maxlen should match the original configuration.
+
+            # Set model modes
+            self.model.train()       # Resume training
+            self.target_model.eval() # Target model stays in eval mode
+
+            dqn_logger.info(f"DQNAgent state for {self.tls_id} loaded successfully from {directory_path}")
+
+        except FileNotFoundError:
+            # Should be caught by the check above, but handle defensively
+            dqn_logger.error(f"Error loading DQNAgent state: File not found during load attempt in {directory_path}")
+        except Exception as e:
+            dqn_logger.error(f"Error loading DQNAgent state for {self.tls_id} from {directory_path}: {e}", exc_info=True)
 
     def remember(self, state, action, reward, next_state, done):
         """Store experience in replay memory with improved error handling.
