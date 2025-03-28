@@ -492,7 +492,7 @@ class Runner:
                     # Import components here to avoid serialization issues
                     from env.network import Network
                     from env.environment import Environment
-                    from utils.data_collector import DataCollector
+                    from utils.data_collector import MetricsCalculator
                     from agents.agent_factory import agent_factory
 
                     # Create network and start simulation
@@ -513,12 +513,8 @@ class Runner:
             if network is None:
                 raise Exception(f"Failed to start SUMO after {max_retries} attempts")
 
-            # Create data collector
-            collector = DataCollector(agent_type, network_name)
-
             # Create environment
             env = Environment(network)
-            env.add_observer(collector)
 
             # Create agents for traffic lights
             tls_ids = network.tls_ids
@@ -552,20 +548,76 @@ class Runner:
                     # Episode loop
                     while not done and step < max_steps:
                         # Get actions from agents
+                        actions = {}
+                        for tls_id, agent in agents.items():
+                            state = env.current_states.get(tls_id)
+                            if state is not None:
+                                action = agent.choose_action(state)
+                                actions[tls_id] = action
+
+                        # Perform step in the environment
                         next_states, rewards, done = env.step(agents)
+                        
+                        # Process step data for each agent
+                        for tls_id, agent in agents.items():
+                            if tls_id in next_states:
+                                # Get the effective action for this agent
+                                effective_action = actions.get(tls_id)
+                                
+                                # Calculate metrics for this agent from link states
+                                link_states = next_states[tls_id]['link_states']
+                                waiting_time = sum(link['waiting_time'] for link in link_states)
+                                vehicle_count = sum(link['vehicle_count'] for link in link_states)
+                                queue_length = sum(link['queue_length'] for link in link_states)
+                                
+                                # Create step data dictionary
+                                step_data_dict = {
+                                    'agent_type': agent_type,
+                                    'network': network_name,
+                                    'episode': env.episode_number,
+                                    'step': env.episode_step - 1,  # Adjusted because env.step already incremented it
+                                    'tls_id': tls_id,
+                                    'action': str(effective_action) if effective_action is not None else 'None',
+                                    'reward': rewards.get(tls_id, 0.0),
+                                    'waiting_time': float(waiting_time),
+                                    'vehicle_count': int(vehicle_count),
+                                    'queue_length': int(queue_length)
+                                }
+                                
+                                # Put on data queue
+                                try:
+                                    data_queue.put({'type': 'step', **step_data_dict})
+                                except Exception as q_err:
+                                    logger.error(f"Failed to put step data on queue: {q_err}")
+                        
                         step += 1
 
-                    if not done and step >= max_steps:
-                        logger.info(f"Episode {episode + 1} reached max steps without natural termination")
-                        # Force notify observers about episode completion
-                        env.notify_episode_complete({
+                    # Handle episode completion
+                    if done or step >= max_steps:
+                        if not done and step >= max_steps:
+                            logger.info(f"Episode {episode + 1} reached max steps without natural termination")
+                        
+                        # Calculate final episode metrics
+                        avg_waiting = np.mean(env.episode_metrics['waiting_times']) if env.episode_metrics['waiting_times'] else 0
+                        total_reward = sum(env.episode_metrics['rewards'])
+                        final_throughput = network.get_arrived_vehicles_count()
+                        
+                        # Create episode data dictionary
+                        episode_data_dict = {
+                            'agent_type': agent_type,
+                            'network': network_name,
                             'episode': env.episode_number,
-                            'avg_waiting': np.mean(env.episode_metrics['waiting_times']) if env.episode_metrics[
-                                'waiting_times'] else 0,
-                            'total_reward': sum(env.episode_metrics['rewards']),
-                            'arrived_vehicles': network.get_arrived_vehicles_count(),
-                            'total_steps': step
-                        })
+                            'avg_waiting': float(avg_waiting),
+                            'total_reward': float(total_reward),
+                            'total_steps': env.episode_step,
+                            'final_throughput': final_throughput
+                        }
+                        
+                        # Put on data queue
+                        try:
+                            data_queue.put({'type': 'episode', **episode_data_dict})
+                        except Exception as q_err:
+                            logger.error(f"Failed to put episode data on queue: {q_err}")
 
                     logger.info(f"Episode {episode + 1}/{num_episodes} completed at step {step}")
                     episodes_completed = episode + 1
@@ -586,9 +638,6 @@ class Runner:
                 progress_dict['episode'] = num_episodes
             except:
                 pass
-
-            # Save data and cleanup
-            collector.save_data(f"{network_name}_{agent_type}_{port}")
 
             # Close connections
             try:
