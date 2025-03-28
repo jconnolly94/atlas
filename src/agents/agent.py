@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, ClassVar, List
+from typing import Dict, Any, ClassVar, List, Tuple, Optional
 
 
 class Agent(ABC):
@@ -10,6 +10,8 @@ class Agent(ABC):
     2. Action selection
     3. Learning mechanism
     4. Reward calculation
+    
+    Supports both legacy phase-based control and modern lane-level control.
     """
 
     # Default configurations for agent subclasses
@@ -24,6 +26,7 @@ class Agent(ABC):
         """
         self.tls_id = tls_id
         self.network = network
+        self.last_action = None
 
     @classmethod
     def create(cls, tls_id, network, **kwargs):
@@ -51,25 +54,30 @@ class Agent(ABC):
         return cls(tls_id, network, **config)
         
     @abstractmethod
-    def choose_action(self, state):
+    def choose_action(self, state: Dict[str, Any]) -> Optional[Tuple[int, str]]:
         """Choose an action based on the current state.
 
+        For lane-level control, should return a tuple of (link_index, new_state)
+        where link_index identifies the specific link to change, and new_state
+        is the signal state to apply (e.g., 'G', 'r', etc.).
+
         Args:
-            state: Current state observation
+            state: Current state observation (dictionary with link_states and current_signal_state)
 
         Returns:
-            The selected action
+            Tuple of (link_index, new_state) or None if no action
         """
         pass
 
     @abstractmethod
-    def learn(self, state, action, next_state, done):
+    def learn(self, state: Dict[str, Any], action: Optional[Tuple[int, str]], 
+              next_state: Dict[str, Any], done: bool) -> None:
         """Learn from experience.
 
         Args:
-            state: Previous state
-            action: Action that was taken
-            next_state: Resulting state
+            state: Previous state dictionary
+            action: Action that was taken as (link_index, new_state)
+            next_state: Resulting state dictionary
             done: Whether this is a terminal state
         """
         pass
@@ -88,20 +96,105 @@ class Agent(ABC):
         """
         return network.get_adjacent_traffic_lights(self.tls_id)
 
-    def calculate_reward(self, state, action, next_state):
-        """Calculate the reward for taking an action.
+    def calculate_reward(self, state: Dict[str, Any], action: Optional[Tuple[int, str]], 
+                         next_state: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+        """Calculate the reward for taking a lane-level action.
 
-        This default implementation can be overridden by subclasses
-        to provide agent-specific reward functions.
+        This default implementation provides a baseline reward function for
+        lane-level control that can be overridden by subclasses.
 
         Args:
-            state: Previous state
-            action: Action that was taken
-            next_state: Resulting state
+            state: Previous state dictionary with link_states and current_signal_state
+            action: Action that was taken as (link_index, new_state)
+            next_state: Resulting state dictionary
 
         Returns:
             reward: Calculated reward value
             components: Dictionary of reward components (for analysis)
+        """
+        if action is None:
+            return 0.0, {}  # No action, no reward
+            
+        # Handle legacy state format for backward compatibility
+        if not isinstance(state, dict) or not isinstance(next_state, dict):
+            return self._legacy_calculate_reward(state, action, next_state)
+            
+        link_index, new_state = action
+        
+        # Get metrics for all links
+        next_link_states = next_state['link_states']
+        
+        # Find the specific link that was changed
+        target_link = None
+        for link in next_link_states:
+            if link['index'] == link_index:
+                target_link = link
+                break
+                
+        if not target_link:
+            return 0.0, {}  # Link not found
+        
+        # Metrics for the targeted link
+        target_waiting_time = target_link['waiting_time']
+        target_queue_length = target_link['queue_length']
+        
+        # Overall metrics across all links
+        total_waiting_time = sum(link['waiting_time'] for link in next_link_states)
+        max_queue_length = max((link['queue_length'] for link in next_link_states), default=0)
+        total_throughput = self.network.get_departed_vehicles_count()
+        
+        # Normalization constants
+        MAX_WAITING_TIME = 500.0
+        MAX_QUEUE_LENGTH = 20.0
+        MAX_THROUGHPUT = 25.0
+        
+        # Normalize metrics
+        norm_target_waiting = min(1.0, target_waiting_time / MAX_WAITING_TIME)
+        norm_total_waiting = min(1.0, total_waiting_time / (MAX_WAITING_TIME * len(next_link_states)))
+        norm_max_queue = min(1.0, max_queue_length / MAX_QUEUE_LENGTH)
+        norm_throughput = min(1.0, total_throughput / MAX_THROUGHPUT)
+        
+        # Component weights
+        W_TARGET_WAITING = 0.3    # Waiting time for target link
+        W_TOTAL_WAITING = 0.3     # Total waiting time across all links
+        W_THROUGHPUT = 0.3        # Overall throughput 
+        W_MAX_QUEUE = 0.1         # Maximum queue length (prevent extremes)
+        
+        # Calculate components (negative waiting times = penalties)
+        target_waiting_component = -norm_target_waiting * W_TARGET_WAITING
+        total_waiting_component = -norm_total_waiting * W_TOTAL_WAITING
+        throughput_component = norm_throughput * W_THROUGHPUT
+        max_queue_component = -norm_max_queue * W_MAX_QUEUE
+        
+        # Combine components
+        total_reward = (
+            target_waiting_component +
+            total_waiting_component +
+            throughput_component +
+            max_queue_component
+        )
+        
+        # Return reward and components for analysis
+        components = {
+            'target_waiting_component': target_waiting_component,
+            'total_waiting_component': total_waiting_component,
+            'throughput_component': throughput_component,
+            'max_queue_component': max_queue_component
+        }
+        
+        return total_reward, components
+        
+    def _legacy_calculate_reward(self, state, action, next_state):
+        """Legacy reward calculation for backward compatibility with phase-based control.
+
+        Args:
+            state: Previous state vector
+            action: Action that was taken
+            next_state: Resulting state vector
+
+        Returns:
+            reward: Calculated reward value
+            components: Dictionary of reward components
         """
         # Get traffic light data
         tls_id = self.tls_id
@@ -117,18 +210,18 @@ class Agent(ABC):
         lane_queues = [self.network.get_lane_queue(lane) for lane in lanes]
         lane_waiting = [self.network.get_lane_waiting_time(lane) for lane in lanes]
 
-        # Default normalization constants - increased for more headroom
-        MAX_WAITING_TIME = 500.0  # Increased to be less punishing for high waiting times
-        MAX_THROUGHPUT = 25.0     # Increased to reward throughput more
-        MAX_QUEUE_LENGTH = 20.0   # Increased to be less punishing for queues
-        MAX_VEHICLES = 40.0       # Increased to be less punishing for congestion
+        # Default normalization constants
+        MAX_WAITING_TIME = 500.0
+        MAX_THROUGHPUT = 25.0
+        MAX_QUEUE_LENGTH = 20.0
+        MAX_VEHICLES = 40.0
 
-        # Default component weights - rebalanced to emphasize throughput more than waiting time
-        W_WAITING = 0.25          # Reduced weight for waiting time penalty (was 0.40)
-        W_THROUGHPUT = 0.45       # Increased weight for throughput reward (was 0.30)
-        W_BALANCE = 0.15          # Lane balance (unchanged)
-        W_CHANGE = 0.05           # Reduced phase change penalty (was 0.10)
-        W_CONGESTION = 0.10       # Increased congestion weight to better handle traffic
+        # Default component weights
+        W_WAITING = 0.25
+        W_THROUGHPUT = 0.45
+        W_BALANCE = 0.15
+        W_CHANGE = 0.05
+        W_CONGESTION = 0.10
 
         # Normalize metrics
         import numpy as np
