@@ -1,8 +1,6 @@
 import os
-import sys
 import time
 import random
-import pandas as pd
 from tqdm import tqdm
 from rich.console import Console
 from rich.table import Table
