@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import copy
 from datetime import datetime
 import logging
 from typing import Dict, List, Optional, Any # Added typing imports
@@ -76,10 +77,23 @@ class RunManager:
             os.makedirs(log_dir)
             logger.info(f"Created directory structure for run '{run_id}' at {run_path}")
 
+            # Create a deep copy of the config to avoid modifying the original
+            config_copy = copy.deepcopy(config)
+            
+            # Add early episode termination config if not present
+            if 'early_episode_termination' not in config_copy:
+                config_copy['early_episode_termination'] = {
+                    'enabled': True,
+                    'max_step_wait_time': 300.0,  # Max wait time on any single link (seconds)
+                    'max_step_queue_length': 40,   # Max halting vehicles on any single link
+                    'min_steps_before_check': 100, # Min steps into episode before checks active
+                    'termination_penalty': -100.0  # Default penalty reward on early termination
+                }
+            
             metadata = {
                 'run_id': run_id,
                 'name': name if name else 'Unnamed Run',
-                'config': config,
+                'config': config_copy,
                 'start_time': datetime.now().isoformat(),
                 'status': 'created',
                 'last_completed_episode': 0 # Track progress for resuming

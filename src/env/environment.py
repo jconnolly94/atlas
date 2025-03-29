@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
+import logging
 
 from src.utils.observer import Observable
 from src.utils.data_collector import MetricsCalculator
@@ -128,11 +129,12 @@ class Environment(Observable):
         self.current_states = states
         return states
 
-    def step(self, agents: Dict[str, 'Agent']) -> Tuple[Dict[str, Any], Dict[str, float], bool]:
+    def step(self, agents: Dict[str, 'Agent'], early_term_config: Dict = None) -> Tuple[Dict[str, Any], Dict[str, float], bool]:
         """Perform one step in the environment with the given agents.
 
         Args:
             agents: Dictionary mapping traffic light IDs to agent objects
+            early_term_config: Configuration for early episode termination
 
         Returns:
             next_states: Dictionary mapping traffic light IDs to next states
@@ -159,8 +161,37 @@ class Environment(Observable):
         # Get new states
         next_states = self.get_state()
 
-        # Calculate rewards and let agents learn
-        rewards = {}
+        # Get the default done status from the simulation
+        done = self.is_terminal_state()
+        early_termination_reason = None
+
+        # Check for early termination conditions if enabled and we've passed minimum steps
+        if (early_term_config and early_term_config.get('enabled', False) and 
+            self.episode_step > early_term_config.get('min_steps_before_check', 100)):
+            
+            # Initialize tracking variables for maximum values
+            max_wait = 0
+            max_queue = 0
+            
+            # Check all links in all traffic lights
+            for tls_id, state_data in next_states.items():
+                for link_state in state_data['link_states']:
+                    max_wait = max(max_wait, link_state.get('waiting_time', 0))
+                    max_queue = max(max_queue, link_state.get('queue_length', 0))
+            
+            # Check termination conditions
+            if max_wait > early_term_config.get('max_step_wait_time', 300.0):
+                early_termination_reason = f"Max wait time exceeded ({max_wait:.1f}s)"
+            elif max_queue > early_term_config.get('max_step_queue_length', 40):
+                early_termination_reason = f"Max queue length exceeded ({max_queue})"
+            
+            # Set done flag if early termination is triggered
+            if early_termination_reason:
+                logging.warning(f"Early termination at episode {self.episode_number}, step {self.episode_step}: {early_termination_reason}")
+                done = True
+
+        # Calculate original rewards for each agent
+        original_rewards = {}
         total_waiting_time = 0
 
         for tls_id, agent in agents.items():
@@ -177,10 +208,33 @@ class Environment(Observable):
 
             # Calculate reward using the agent's own reward function
             reward, components = agent.calculate_reward(old_state, effective_action, next_state)
-            rewards[tls_id] = reward
+            original_rewards[tls_id] = reward
 
-            # Track metrics for this step
-            done = self.is_terminal_state()
+        # Determine final rewards based on early termination status
+        final_rewards = {}
+        if early_termination_reason and early_term_config:
+            # Apply termination penalty to all agents
+            termination_penalty = early_term_config.get('termination_penalty', -100.0)
+            for tls_id in agents.keys():
+                if tls_id in original_rewards:  # Only include agents with valid states
+                    final_rewards[tls_id] = termination_penalty
+        else:
+            # Use original rewards when no early termination
+            final_rewards = original_rewards
+
+        # Let agents learn and track metrics
+        for tls_id, agent in agents.items():
+            # Skip if we don't have both states
+            if tls_id not in old_states or tls_id not in next_states or tls_id not in final_rewards:
+                continue
+
+            old_state = old_states[tls_id]
+            next_state = next_states[tls_id]
+            action = actions.get(tls_id)
+            effective_action = action if action is not None else self.last_actions.get(tls_id)
+            reward = final_rewards[tls_id]
+
+            # Let agent learn with potentially updated done flag
             agent.learn(old_state, effective_action, next_state, done)
 
             # Update metrics - use effective_action for data collection
@@ -196,14 +250,11 @@ class Environment(Observable):
 
         # Track episode metrics
         self.episode_metrics['waiting_times'].append(total_waiting_time)
-        self.episode_metrics['rewards'].append(sum(rewards.values()))
+        self.episode_metrics['rewards'].append(sum(final_rewards.values()))
         self.episode_metrics['throughput'].append(self.network.get_departed_vehicles_count())
 
         # Update step counter
         self.episode_step += 1
-
-        # Check if episode is complete
-        done = self.is_terminal_state()
 
         # If episode is complete, notify observers
         if done:
@@ -213,10 +264,11 @@ class Environment(Observable):
                     'waiting_times'] else 0,
                 'total_reward': sum(self.episode_metrics['rewards']),
                 'arrived_vehicles': self.network.get_arrived_vehicles_count(),
-                'total_steps': self.episode_step
+                'total_steps': self.episode_step,
+                'termination_reason': early_termination_reason if early_termination_reason else 'natural'
             })
 
-        return next_states, rewards, done
+        return next_states, final_rewards, done
 
     def apply_actions(self, actions: Dict[str, Any]) -> None:
         """Apply lane-level actions to the traffic network.
