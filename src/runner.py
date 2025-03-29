@@ -61,7 +61,8 @@ def data_writer_process(queue, step_file_path, episode_file_path):
         pa.field('avg_waiting', pa.float64()),
         pa.field('total_reward', pa.float64()),
         pa.field('total_steps', pa.int64()),      # Added based on worker data
-        pa.field('final_throughput', pa.int64()) # Added based on worker data
+        pa.field('final_throughput', pa.int64()), # Added based on worker data
+        pa.field('termination_reason', pa.string()) # Added for early episode termination tracking
         # Add any other fields sent by the worker for episode data
     ])
 
@@ -877,6 +878,19 @@ class Runner:
                          # Continue with the fresh agent instance
                 agents[tls_id] = agent
 
+            # --- Load Complete Run Metadata and Extract Early Termination Config ---
+            metadata = run_manager.load_metadata(run_id)
+            run_config = metadata.get('config', {})
+            early_term_config = run_config.get('early_episode_termination', {
+                # Provide safe defaults if metadata is missing/old
+                'enabled': True,  # Default to disabled if missing
+                'max_step_wait_time': 300.0,
+                'max_step_queue_length': 40,
+                'min_steps_before_check': 100,
+                'termination_penalty': -100.0
+            })
+            worker_logger.info(f"Early termination config: {early_term_config}")
+
             # Training loop
             worker_logger.info(f"Starting training loop from episode {start_episode + 1} to {start_episode + num_episodes_to_run}")
             episodes_run_this_session = 0
@@ -908,8 +922,8 @@ class Runner:
                                 action = agent.choose_action(state)
                                 actions[tls_id] = action
 
-                        # Perform step in the environment
-                        next_states, rewards, done = env.step(agents)
+                        # Perform step in the environment with early termination config
+                        next_states, rewards, done = env.step(agents, early_term_config)
 
                         # Process step data for each agent
                         for tls_id, agent in agents.items():
@@ -955,7 +969,10 @@ class Runner:
                         total_reward = sum(env.episode_metrics['rewards'])
                         final_throughput = network.get_arrived_vehicles_count()
 
-                        # Create episode data dictionary
+                        # Get termination reason if available, or use a default
+                        termination_reason = 'max_steps' if (not done and step >= max_steps) else 'natural'
+
+                        # Create episode data dictionary with termination reason
                         episode_data_dict = {
                             'agent_type': agent_type,
                             'network': network_name,
@@ -963,7 +980,8 @@ class Runner:
                             'avg_waiting': float(avg_waiting),
                             'total_reward': float(total_reward),
                             'total_steps': env.episode_step,
-                            'final_throughput': final_throughput
+                            'final_throughput': final_throughput,
+                            'termination_reason': termination_reason  # Include termination reason
                         }
 
                         # Put on data queue
