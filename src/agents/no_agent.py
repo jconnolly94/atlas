@@ -2,6 +2,7 @@
 from .agent import Agent
 from typing import Dict, Any, Tuple, Optional
 import random
+import os  # Add import for file operations
 
 
 class NoAgent(Agent):
@@ -139,3 +140,22 @@ class NoAgent(Agent):
             
         # If neither format works, return zero
         return 0.0, {}
+        
+    def save_state(self, directory_path: str):
+        """
+        No state to save for NoAgent. Ensures directory exists as per base class contract.
+        """
+        # Call base method to ensure directory exists if it does that, or create manually
+        try:
+            super().save_state(directory_path)
+        except AttributeError:  # Fallback if Agent base class save_state only has pass
+            os.makedirs(directory_path, exist_ok=True)
+        # No actual state saving needed
+        pass
+
+    def load_state(self, directory_path: str):
+        """
+        No state to load for NoAgent. Does nothing.
+        """
+        # No state loading needed
+        pass

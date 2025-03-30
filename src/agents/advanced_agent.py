@@ -310,7 +310,7 @@ class AdvancedAgent(Agent):
         self.network = network
 
         # Maximum number of links and features per link
-        self.max_links = 24  # Support more links than standard DQN
+        self.max_links = 26  # Support more links than standard DQN
         self.link_dim = 6    # Add an extra feature for historical trend
 
         # Possible link states (G for green, r for red)
@@ -628,72 +628,80 @@ class AdvancedAgent(Agent):
         return action
 
     def remember(self, state, action, reward, next_state, done):
-        """Store experience in replay memory with prioritization.
-        # ... (rest of implementation) ...
-        """
+        """Store experience in replay memory with prioritization. (Corrected Mapping)"""
         if action is None or state is None or next_state is None:
             adv_logger.warning("Skipping remember due to None input.")
             return
 
         try:
-            # Preprocess states
+            # Preprocess states (creates padded arrays of size max_links)
             link_features, signal_state = self._preprocess_state(state)
             next_link_features, next_signal_state = self._preprocess_state(next_state)
 
-            # Extract link index and new state
-            link_idx, new_state = action
+            # Extract link index (SUMO index) and new state from the action tuple
+            link_idx_sumo, new_state = action
 
-            # Find the internal index (0 to max_links-1) of the link that was acted upon
-            # This needs to map the *actual* link_index from SUMO to the *position* in our padded link_features array
-            link_internal_idx = -1 # Default to invalid
+            # --- START: Robust Positional Index Finding ---
+            link_internal_idx = -1 # Initialize as invalid (positional index 0 to max_links-1)
             original_link_states = state.get('link_states', [])
+            found_at_position = -1
+
+            # Search the *entire* original list for the SUMO index from the action
             for i, link in enumerate(original_link_states):
-                if i < self.max_links: # Only consider links within our padded array size
-                    if link.get('index') == link_idx:
-                        link_internal_idx = i
-                        break
-                else:
-                    break # Stop searching if we exceed max_links
+                if link.get('index') == link_idx_sumo:
+                    found_at_position = i
+                    break # Found the SUMO index at position i
 
-            if link_internal_idx == -1:
-                 adv_logger.warning(f"Action link index {link_idx} not found within first {self.max_links} links of state. Storing with index 0.")
-                 link_internal_idx = 0 # Fallback to index 0 if not found
+            # Check if found AND if its position corresponds to a feature vector we actually processed and stored
+            if found_at_position != -1 and found_at_position < self.max_links:
+                # Valid: The action corresponds to a link within our processed feature range
+                link_internal_idx = found_at_position
+            else:
+                # Invalid: Action's SUMO link index was either not found at all,
+                # or it was found at a position >= max_links, meaning its features
+                # weren't included in the link_features array stored in memory.
+                if found_at_position == -1:
+                     adv_logger.error(f"Action's SUMO link index {link_idx_sumo} not found anywhere in state's link_states list for TLS {self.tls_id}. Skipping remember.")
+                else: # found_at_position >= self.max_links
+                     adv_logger.error(f"Action's SUMO link index {link_idx_sumo} found at position {found_at_position} in state's link_states list, "
+                                      f"which is >= max_links ({self.max_links}). Features for this link were not processed/stored. Skipping remember.")
+                return # Skip storing this experience as it cannot be learned from correctly
 
-            # Find the index of the new state in our link_states list
+            # --- END: Robust Positional Index Finding ---
+
+
+            # Find the index of the new state in our defined link_states list ['G', 'r']
             action_idx = self.link_states.index(new_state) if new_state in self.link_states else 0
 
-            # Create experience tuple (ensure numpy arrays are used for features)
+            # Create experience tuple (using the validated positional index)
             experience = (
-                link_features,          # Numpy array
+                link_features,          # Numpy array [max_links, link_dim]
                 signal_state,           # String
-                (link_internal_idx, action_idx), # Tuple (int, int)
+                (link_internal_idx, action_idx), # Tuple (VALIDATED POSITIONAL idx, action type idx)
                 float(reward),          # Ensure reward is float
-                next_link_features,     # Numpy array
+                next_link_features,     # Numpy array [max_links, link_dim]
                 next_signal_state,      # String
                 bool(done)              # Ensure done is bool
             )
 
+            # --- Store experience based on replay type ---
+            # (Rest of the memory storage logic remains the same)
             if self.prioritized_replay:
-                # Calculate initial priority (TD-error is better, but need to compute it first)
-                # For now, add with max priority to ensure it gets sampled
                 max_priority = 1.0
                 if self.memory:
                     try:
-                        # Find max priority among existing tuples (priority is the second element)
-                        max_priority = max(p for _, p in self.memory)
-                    except ValueError: # Handles case where memory might be temporarily empty during processing
+                        # Filter out potential invalid entries before finding max
+                        valid_priorities = [p for item, p in self.memory if isinstance(item, tuple) and isinstance(p, (float, int))]
+                        if valid_priorities: max_priority = max(valid_priorities)
+                    except (ValueError, TypeError) as e:
+                         adv_logger.warning(f"Could not determine max priority, defaulting to 1.0. Error: {e}")
                          max_priority = 1.0
-
-                # Add to memory
                 self.memory.append((experience, max_priority))
-
-                # Keep memory within size limit - remove lowest priority if full? (More complex)
-                # Simple approach: remove oldest
-                if len(self.memory) > self.memory_size:
-                    self.memory.pop(0)
+                # Simple FIFO removal if memory exceeds size
+                if len(self.memory) > self.memory_size: self.memory.pop(0)
             else:
-                # Standard experience replay
-                self.memory.append(experience) # deque handles maxlen automatically
+                # Standard experience replay (deque handles maxlen)
+                self.memory.append(experience)
 
         except Exception as e:
             adv_logger.error(f"Error remembering experience: {e}", exc_info=True)
@@ -1031,9 +1039,6 @@ class AdvancedAgent(Agent):
         target_model_path = os.path.join(directory_path, 'target_model.pth')
         optimizer_path = os.path.join(directory_path, 'optimizer.pth')
         hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
-        # Optional: Paths for memory, history
-        # memory_path = os.path.join(directory_path, 'memory.pkl')
-        # history_path = os.path.join(directory_path, 'history.pkl')
 
         # Check if essential files exist
         required_files = [model_path, target_model_path, optimizer_path, hyperparams_path]
