@@ -9,7 +9,7 @@ from src.utils.data_collector import MetricsCalculator
 class Environment(Observable):
     """Environment that manages the traffic simulation with lane-level traffic control."""
 
-    def __init__(self, network):
+    def __init__(self, network, data_queue=None):
         """Initialize the environment.
 
         Args:
@@ -18,9 +18,12 @@ class Environment(Observable):
         super().__init__()  # Initialize Observable base class
         self.network = network
         self.metrics_calculator = MetricsCalculator(network)
+        self.data_queue = data_queue  # Store the queue
         self.current_states = {}
         self.episode_step = 0
         self.episode_number = 0
+        self.last_termination_reason = None  # Add this to store reason
+        self.last_episode_step_count = 0  # Add this
         self.episode_metrics = {
             'waiting_times': [],
             'rewards': [],
@@ -48,6 +51,8 @@ class Environment(Observable):
         self.last_change_time = {}  # Reset last change time
         self.episode_step = 0
         self.episode_number += 1
+        self.last_termination_reason = None  # Clear reason on reset
+        self.last_episode_step_count = 0
         self.episode_metrics = {
             'waiting_times': [],
             'rewards': [],
@@ -129,7 +134,7 @@ class Environment(Observable):
         self.current_states = states
         return states
 
-    def step(self, agents: Dict[str, 'Agent'], early_term_config: Dict = None) -> Tuple[Dict[str, Any], Dict[str, float], bool]:
+    def step(self, agents: Dict[str, 'Agent'], agent_type: str = None, network_name: str = None, early_term_config: Dict = None) -> Tuple[Dict[str, Any], Dict[str, float], bool]:
         """Perform one step in the environment with the given agents.
 
         Args:
@@ -180,7 +185,7 @@ class Environment(Observable):
                     max_queue = max(max_queue, link_state.get('queue_length', 0))
             
             # Check termination conditions
-            if max_wait > early_term_config.get('max_step_wait_time', 300.0):
+            if max_wait > early_term_config.get('max_step_wait_time', 120.0):
                 early_termination_reason = f"Max wait time exceeded ({max_wait:.1f}s)"
             elif max_queue > early_term_config.get('max_step_queue_length', 40):
                 early_termination_reason = f"Max queue length exceeded ({max_queue})"
@@ -189,6 +194,7 @@ class Environment(Observable):
             if early_termination_reason:
                 logging.warning(f"Early termination at episode {self.episode_number}, step {self.episode_step}: {early_termination_reason}")
                 done = True
+                self.last_termination_reason = early_termination_reason  # Store reason in instance
 
         # Calculate original rewards for each agent
         original_rewards = {}
@@ -255,18 +261,49 @@ class Environment(Observable):
 
         # Update step counter
         self.episode_step += 1
+        self.last_episode_step_count = self.episode_step  # Store current step count
 
-        # If episode is complete, notify observers
+        # If episode is complete, notify observers and queue the data
         if done:
-            self.notify_episode_complete({
+            # Determine final reason
+            final_reason = self.last_termination_reason if self.last_termination_reason else ('max_steps' if self.episode_step >= 1000 else 'natural')
+            
+            # Calculate final metrics
+            avg_waiting = np.mean(self.episode_metrics['waiting_times']) if self.episode_metrics['waiting_times'] else 0
+            total_reward = sum(self.episode_metrics['rewards'])
+            final_throughput = self.network.get_arrived_vehicles_count()
+            
+            # Create completion data dictionary 
+            completion_data = {
                 'episode': self.episode_number,
-                'avg_waiting': np.mean(self.episode_metrics['waiting_times']) if self.episode_metrics[
-                    'waiting_times'] else 0,
-                'total_reward': sum(self.episode_metrics['rewards']),
-                'arrived_vehicles': self.network.get_arrived_vehicles_count(),
-                'total_steps': self.episode_step,
-                'termination_reason': early_termination_reason if early_termination_reason else 'natural'
-            })
+                'avg_waiting': avg_waiting,
+                'total_reward': total_reward,
+                'arrived_vehicles': final_throughput,
+                'total_steps': self.last_episode_step_count,
+                'termination_reason': final_reason
+            }
+            
+            # Notify observers (legacy mechanism)
+            self.notify_episode_complete(completion_data)
+            
+            # Put onto the queue if it exists and we have agent_type and network_name
+            if self.data_queue and agent_type and network_name:
+                try:
+                    episode_data_dict = {
+                        'type': 'episode',
+                        'agent_type': agent_type,
+                        'network': network_name,
+                        'episode': self.episode_number,
+                        'avg_waiting': float(avg_waiting),
+                        'total_reward': float(total_reward),
+                        'total_steps': self.last_episode_step_count,
+                        'final_throughput': final_throughput,
+                        'termination_reason': final_reason
+                    }
+                    self.data_queue.put(episode_data_dict)
+                    logging.debug(f"Queued episode data: {episode_data_dict}")
+                except Exception as q_err:
+                    logging.error(f"Failed to put episode data on queue: {q_err}")
 
         return next_states, final_rewards, done
 

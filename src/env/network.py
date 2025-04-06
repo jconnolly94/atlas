@@ -3,9 +3,11 @@ import traci
 import networkx as nx
 import os
 import warnings
-from typing import List, Dict, Any, Tuple, Optional
+import logging
+from typing import List, Dict, Any, Tuple, Optional, Set
 
 from src.utils.network_exporter import NetworkExporter
+from src.utils.conflict_detector import ConflictDetector
 
 
 class NetworkInterface:
@@ -93,6 +95,7 @@ class Network(NetworkInterface):
         self.tls_ids = []
         self.port = None
         self.previous_waiting_times = {}  # Track previous waiting times
+        self.conflict_detector = None  # Will be initialized after simulation starts
 
         # Extract network name from config file path
         self.network_name = os.path.splitext(os.path.basename(sumo_config_file))[0]
@@ -322,55 +325,28 @@ class Network(NetworkInterface):
         Returns:
             True if conflicts are detected, False otherwise
         """
-        # Get information about the junction topology
-        links = self.get_controlled_links(tls_id)
-        if not links:  # Empty list indicates error
-            print(f"Warning: Cannot check physical conflicts - no links for {tls_id}")
+        # Check if conflict detector is available
+        if self.conflict_detector is None:
+            print(f"Warning: Conflict detector not initialized. Cannot check conflicts for {tls_id}")
             return False
-        
+            
         # Find links that would be green in the proposed state
         green_links = [i for i, c in enumerate(proposed_state) if c in 'Gg']
         
-        # Check for conflicting movements (simplified)
-        # For safety, we'll only allow orthogonal movements to be green at the same time
-        for i in green_links:
-            for j in green_links:
-                if i != j and i < len(links) and j < len(links) and links[i] and links[j]:
-                    # Use a simple check for conflicts
-                    if self._simple_conflict_check(links[i][0], links[j][0]):
-                        return True
+        # No conflicts if fewer than 2 green links
+        if len(green_links) < 2:
+            return False
+            
+        # Check all pairs of green links for conflicts
+        for i, link1_idx in enumerate(green_links):
+            for link2_idx in green_links[i+1:]:  # Only check each pair once
+                if self.conflict_detector.check_conflict(tls_id, link1_idx, link2_idx):
+                    print(f"Conflict detected at {tls_id}: links {link1_idx} and {link2_idx} cannot be green simultaneously")
+                    return True
         
         return False
 
-    def _simple_conflict_check(self, link1: Tuple[str, str, str], link2: Tuple[str, str, str]) -> bool:
-        """Fallback check for conflicts when geometric data is unavailable.
-        
-        Args:
-            link1: First link as (fromLane, toLane, internalLane)
-            link2: Second link as (fromLane, toLane, internalLane)
-            
-        Returns:
-            True if the links likely conflict, False otherwise
-        """
-        # Get from and to edges
-        try:
-            from_edge1 = link1[0].split('_')[0]
-            to_edge1 = link1[1].split('_')[0]
-            from_edge2 = link2[0].split('_')[0]
-            to_edge2 = link2[1].split('_')[0]
-            
-            # Check for crossing paths (from different directions to different directions)
-            if from_edge1 != from_edge2 and to_edge1 != to_edge2:
-                return True
-            
-            # Same destination is a conflict
-            if to_edge1 == to_edge2:
-                return True
-        except Exception as e:
-            print(f"Warning: Error in simple conflict check: {e}")
-            return True  # Safer to assume conflict if error
-        
-        return False
+    # The _simple_conflict_check method is no longer needed as we now use the ConflictDetector
 
     def get_link_metrics(self, tls_id: str) -> List[Dict[str, Any]]:
         """Get performance metrics for each link controlled by a traffic light.
@@ -559,6 +535,15 @@ class Network(NetworkInterface):
             traci.start(cmd, port=port, stdout=logfile)
             self.build_from_sumo()
             self.tls_ids = traci.trafficlight.getIDList()
+            
+            # Initialize the conflict detector now that we have a valid SUMO config
+            try:
+                self.conflict_detector = ConflictDetector(self.sumo_config_file)
+                print(f"Conflict detector initialized successfully")
+            except Exception as e:
+                print(f"Error initializing conflict detector: {e}")
+                print(f"Simulation will proceed but conflict detection may be unavailable")
+            
             print(f"Simulation started on port {self.port}. Detected TLS IDs: {self.tls_ids}")
             return True
         except Exception as e:

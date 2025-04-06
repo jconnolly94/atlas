@@ -1,5 +1,3 @@
-# --- START OF FILE advanced_agent.py ---
-
 import random
 import numpy as np
 import torch
@@ -127,19 +125,11 @@ class AdvancedSignalStateEncoder(nn.Module):
             weighted_embeddings = char_embeddings * attention_weights  # [seq_len, embedding_dim]
             batch_embeddings.append(weighted_embeddings)
 
-        # Pad sequences to the same length if necessary before stacking
-        # Note: If all state strings have the same length, padding isn't needed.
-        # If lengths vary, use torch.nn.utils.rnn.pad_sequence
         try:
              # Simple stacking assuming equal length for now
              return torch.stack(batch_embeddings)  # [batch_size, seq_len, embedding_dim]
         except RuntimeError as e:
              adv_logger.error(f"Error stacking signal embeddings (lengths might differ?): {e}")
-             # Implement padding if needed based on error message
-             # Example using pad_sequence (adjust batch_first as needed):
-             # padded_embeddings = torch.nn.utils.rnn.pad_sequence(batch_embeddings, batch_first=True, padding_value=0.0)
-             # return padded_embeddings
-             # For now, return an empty tensor or raise error to highlight the issue
              return torch.zeros(0)
 
 
@@ -285,9 +275,9 @@ class AdvancedAgent(Agent):
     DEFAULT_CONFIG = {
         "alpha": 0.0005,          # Lower learning rate for stability
         "gamma": 0.98,            # Higher discount factor for long-term planning
-        "epsilon": 0.9,           # Very high exploration rate
-        "epsilon_decay": 0.9997,  # Very slow decay to keep exploring longer
-        "epsilon_min": 0.2,       # Higher minimum to maintain some exploration
+        "epsilon": 0.95,           # INCREASE: Start with more randomness
+        "epsilon_decay": 0.9997,   # DECREASE DECAY RATE: Slow down decay significantly
+        "epsilon_min": 0.05,       # Keep minimum low for long-term
         "batch_size": 64,         # Larger batch size for better gradient estimates
         "memory_size": 50000,     # Much larger memory for diverse experiences
         "target_update_freq": 250,  # Less frequent updates for stability
@@ -873,125 +863,113 @@ class AdvancedAgent(Agent):
             adv_logger.info(f"Updating target network at step {self.train_step}")
             self.target_model.load_state_dict(self.model.state_dict())
 
+    # --- DELTA-BASED REWARD FUNCTION ---
     def calculate_reward(self, state, action, next_state):
-        """Calculate advanced reward with sophisticated metrics.
-        # ... (rest of implementation - assumes state/action are valid) ...
         """
-        if action is None or not isinstance(state, dict) or not isinstance(next_state, dict):
+        Calculate delta-based reward focusing on change in total waiting time
+        and per-step throughput, using estimated normalization constants.
+
+        Args:
+            state: Previous state dictionary (expected to be available via self.last_state).
+            action: Action taken tuple (link_index, new_state).
+            next_state: Resulting state dictionary.
+
+        Returns:
+            Tuple[float, Dict[str, float]]: Calculated reward and its components.
+        """
+        # --- Input Validation ---
+        # Access previous state via self.last_state, set in choose_action/learn loop
+        if action is None or self.last_state is None or not isinstance(self.last_state, dict) \
+           or next_state is None or not isinstance(next_state, dict):
+            # Use the agent's logger if available, otherwise print
+            logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
+            logger_instance.warning(f"Missing state/action for reward calc (TLS: {self.tls_id}). Action: {action}, Last State Type: {type(self.last_state)}, Next State Type: {type(next_state)}")
             return 0.0, {}
 
-        link_index, new_state = action
+        previous_link_states = self.last_state.get('link_states', [])
+        current_link_states = next_state.get('link_states', [])
 
-        # Get metrics for all links from next_state
-        next_link_states = next_state.get('link_states', [])
-        if not next_link_states: return 0.0, {}
+        # Handle cases where link_states might be missing in one state but not the other
+        if not previous_link_states and not current_link_states:
+             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
+             logger_instance.warning(f"Missing link_states in both prev/curr states for reward calc (TLS: {self.tls_id}).")
+             return 0.0, {}
+        # Ensure lists exist even if empty for sum()
+        previous_link_states = previous_link_states or []
+        current_link_states = current_link_states or []
 
-        # Find the specific link that was changed
-        target_link = None
-        for link in next_link_states:
-            if link.get('index') == link_index:
-                target_link = link
-                break
-        if not target_link: return 0.0, {}
 
-        # Metrics for the targeted link
-        target_waiting_time = target_link.get('waiting_time', 0.0)
-        target_queue_length = target_link.get('queue_length', 0)
+        # --- Define Normalization Constants Based on Diagnostics ---
+        # Estimated max absolute change in total wait time across all agent links in one step
+        MAX_ABS_DELTA_WAIT_TIME = 500.0
+        # Estimated max network-wide vehicles processed in one agent step
+        MAX_STEP_THROUGHPUT = 10.0
+        # Small epsilon to prevent division by zero
+        EPSILON = 1e-6
 
-        # Overall metrics across all links
-        total_waiting_time = sum(link.get('waiting_time', 0.0) for link in next_link_states)
-        max_queue_length = max((link.get('queue_length', 0) for link in next_link_states), default=0)
-        total_throughput = self.network.get_departed_vehicles_count() if hasattr(self.network, 'get_departed_vehicles_count') else 0
+        # --- Metric Calculation ---
+        # Delta Waiting Time
+        previous_total_waiting_time = sum(link.get('waiting_time', 0.0) for link in previous_link_states)
+        current_total_waiting_time = sum(link.get('waiting_time', 0.0) for link in current_link_states)
+        # Positive value means waiting time decreased (improvement)
+        delta_waiting_time = previous_total_waiting_time - current_total_waiting_time
 
-        # Flow smoothness (variance in queue lengths)
-        queue_lengths = [link.get('queue_length', 0) for link in next_link_states]
-        queue_balance = 0.0
-        if len(queue_lengths) > 1:
-            queue_variance = np.var(queue_lengths)
-            queue_balance = -min(1.0, queue_variance / 100.0) # Penalty for high variance
+        # Step Throughput (Network-wide)
+        current_cumulative_throughput = 0
+        if hasattr(self.network, 'get_departed_vehicles_count') and callable(self.network.get_departed_vehicles_count):
+             current_cumulative_throughput = self.network.get_departed_vehicles_count()
+        else:
+             # Use logger instance
+             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
+             logger_instance.warning("Network object or get_departed_vehicles_count method not available for throughput calculation.")
+        # Ensure _last_throughput exists, initialize if not (e.g., first call)
+        if not hasattr(self, '_last_throughput'):
+             self._last_throughput = current_cumulative_throughput # Initialize based on current value first time
+        step_throughput = max(0.0, float(current_cumulative_throughput - self._last_throughput))
+        # Update for the next step's calculation
+        self._last_throughput = current_cumulative_throughput
 
-        # Waiting time reduction
-        norm_waiting_change = 0.0
-        if self.last_state is not None and isinstance(self.last_state, dict):
-            prev_link_states = self.last_state.get('link_states', [])
-            prev_target_link = None
-            for link in prev_link_states:
-                if link.get('index') == link_index:
-                    prev_target_link = link
-                    break
-            if prev_target_link:
-                waiting_time_change = prev_target_link.get('waiting_time', 0.0) - target_waiting_time
-                norm_waiting_change = max(-1.0, min(1.0, waiting_time_change / 100.0))
+        # --- Normalization ---
+        # Normalize delta waiting time - result in [-1, 1]
+        norm_delta_wait = delta_waiting_time / (MAX_ABS_DELTA_WAIT_TIME + EPSILON)
+        norm_delta_wait = max(-1.0, min(1.0, norm_delta_wait)) # Clip to handle estimate errors
 
-        # Signal state pattern efficiency
-        signal_efficiency = 0.0
-        current_signal_state = next_state.get('current_signal_state', '')
-        for link in next_link_states:
-            idx = link.get('index', -1)
-            if 0 <= idx < len(current_signal_state):
-                is_green = current_signal_state[idx] in 'Gg'
-                has_traffic = link.get('vehicle_count', 0) > 0
-                if (is_green and has_traffic) or (not is_green and not has_traffic):
-                    signal_efficiency += 0.05
-                elif is_green and not has_traffic:
-                    signal_efficiency -= 0.05
+        # Normalize step throughput - result in [0, 1]
+        norm_throughput = step_throughput / (MAX_STEP_THROUGHPUT + EPSILON)
+        norm_throughput = min(1.0, norm_throughput) # Clip (can't be less than 0 due to max(0,...) above)
 
-        # Normalization constants
-        MAX_WAITING_TIME = 1000.0
-        MAX_QUEUE_LENGTH = 30.0
-        MAX_THROUGHPUT = 30.0
-        num_links = len(next_link_states) if next_link_states else 1
+        # --- Component Weights ---
+        W_DELTA_WAIT = 1.0    # Weight for waiting time improvement
+        W_THROUGHPUT = 0.3    # Weight for throughput (adjust relative importance)
 
-        # Normalize metrics safely
-        norm_target_waiting = min(1.0, target_waiting_time / MAX_WAITING_TIME) if MAX_WAITING_TIME > 0 else 0.0
-        norm_total_waiting = min(1.0, total_waiting_time / (MAX_WAITING_TIME * num_links)) if MAX_WAITING_TIME > 0 else 0.0
-        norm_max_queue = min(1.0, max_queue_length / MAX_QUEUE_LENGTH) if MAX_QUEUE_LENGTH > 0 else 0.0
-        norm_throughput = min(1.0, total_throughput / MAX_THROUGHPUT) if MAX_THROUGHPUT > 0 else 0.0
-
-        # Component weights
-        W_TARGET_WAITING = 0.25
-        W_TOTAL_WAITING = 0.25
-        W_THROUGHPUT = 0.15
-        W_MAX_QUEUE = 0.05
-        W_QUEUE_BALANCE = 0.1
-        W_WAITING_CHANGE = 0.1
-        W_SIGNAL_EFFICIENCY = 0.1
-
-        # Calculate components
-        target_waiting_component = -norm_target_waiting * W_TARGET_WAITING
-        total_waiting_component = -norm_total_waiting * W_TOTAL_WAITING
+        # --- Calculate Reward ---
+        delta_wait_component = norm_delta_wait * W_DELTA_WAIT
         throughput_component = norm_throughput * W_THROUGHPUT
-        max_queue_component = -norm_max_queue * W_MAX_QUEUE
-        queue_balance_component = queue_balance * W_QUEUE_BALANCE
-        waiting_change_component = norm_waiting_change * W_WAITING_CHANGE
-        signal_efficiency_component = signal_efficiency * W_SIGNAL_EFFICIENCY
 
-        # Combine components
-        total_reward = (
-            target_waiting_component + total_waiting_component +
-            throughput_component + max_queue_component +
-            queue_balance_component + waiting_change_component +
-            signal_efficiency_component
-        )
+        total_reward = delta_wait_component + throughput_component
 
+        # --- Store components for analysis ---
         components = {
-            'target_waiting_comp': target_waiting_component,
-            'total_waiting_comp': total_waiting_component,
+            'delta_wait_comp': delta_wait_component,
             'throughput_comp': throughput_component,
-            'max_queue_comp': max_queue_component,
-            'queue_balance_comp': queue_balance_component,
-            'waiting_change_comp': waiting_change_component,
-            'signal_efficiency_comp': signal_efficiency_component
+            # Raw values for debugging/analysis
+            'raw_delta_wait': delta_waiting_time,
+            'raw_step_throughput': step_throughput,
+            'raw_prev_wait': previous_total_waiting_time,
+            'raw_curr_wait': current_total_waiting_time,
         }
 
-        return total_reward, components
+        # Note: self.last_state should be updated externally in the training loop
+        # after calling agent.learn() which uses this reward function.
 
+        return total_reward, components
+    # --- END DELTA-BASED REWARD FUNCTION ---
 
     # --- save_state and load_state methods ---
     def save_state(self, directory_path: str):
         """Saves the AdvancedAgent's state to the specified directory."""
         super().save_state(directory_path) # Creates directory via base class call
-        adv_logger.info(f"Saving AdvancedAgent state for {self.tls_id} to {directory_path}")
+        #adv_logger.info(f"Saving AdvancedAgent state for {self.tls_id} to {directory_path}")
 
         model_path = os.path.join(directory_path, 'model.pth')
         target_model_path = os.path.join(directory_path, 'target_model.pth')
@@ -1025,7 +1003,7 @@ class AdvancedAgent(Agent):
                 json.dump(hyperparams, f, indent=4)
 
 
-            adv_logger.info(f"AdvancedAgent state saved successfully for {self.tls_id}.")
+            #adv_logger.info(f"AdvancedAgent state saved successfully for {self.tls_id}.")
 
         except Exception as e:
             adv_logger.error(f"Error saving AdvancedAgent state for {self.tls_id}: {e}", exc_info=True)
@@ -1091,9 +1069,6 @@ class AdvancedAgent(Agent):
                 self.priority_alpha = hyperparams.get('priority_alpha', self.priority_alpha)
                 self.priority_beta = hyperparams.get('priority_beta', self.priority_beta) # Load saved beta
 
-                # Note: memory_size, double_dqn, prioritized_replay are typically part of config,
-                # loading them might change agent behavior significantly if config differs. Usually rely on __init__.
-
             # Set model modes correctly after loading
             self.model.train()
             self.target_model.eval()
@@ -1104,5 +1079,3 @@ class AdvancedAgent(Agent):
             adv_logger.error(f"Error loading AdvancedAgent state: File not found during load attempt in {directory_path}")
         except Exception as e:
             adv_logger.error(f"Error loading AdvancedAgent state for {self.tls_id}: {e}", exc_info=True)
-
-# --- END OF FILE advanced_agent.py ---

@@ -149,8 +149,6 @@ def data_writer_process(queue, step_file_path, episode_file_path):
                 # Write the table to the Parquet file
                 writer.write_table(table)
                 items_processed += 1
-                if items_processed % 1000 == 0: # Log progress periodically
-                     logger.info(f"Processed {items_processed} items...")
 
             except pa.ArrowInvalid as arrow_err:
                  logger.error(f"Schema mismatch or data conversion error for {item_type}: {arrow_err}. Item: {record}")
@@ -158,12 +156,11 @@ def data_writer_process(queue, step_file_path, episode_file_path):
             except Exception as write_err:
                 logger.error(f"Error writing {item_type} data to Parquet: {write_err}. Item: {record}")
                 error_count += 1
-                # Consider adding a small sleep here if errors are persistent to avoid spamming logs
                 time.sleep(0.1)
 
     except Exception as setup_err:
          logger.error(f"Error during data writer setup or main loop: {setup_err}")
-         traceback.print_exc() # Print full traceback for setup errors
+         traceback.print_exc()
     finally:
         # Cleanly close writers
         closed_count = 0
@@ -196,6 +193,7 @@ class Runner:
             ("Simple4wayCross", "../Networks/Simple4wayCross/simpleCross.sumocfg"),
             ("DublinRd", "../Networks/DublinRd/DublinRd.sumocfg"),
             ("RoxboroArea", "../Networks/RoxboroArea/RoxboroArea.sumocfg"),
+            ("LimerickCity", "../Networks/LimerickCity/LimerickCity.sumocfg"),
         ]
         self.available_agents = [
             "Q-Learning",  # Using lane-level control by default
@@ -786,10 +784,6 @@ class Runner:
         # Add the handler to this worker's logger
         worker_logger.addHandler(file_handler)
 
-        # Optional: Add a StreamHandler to see worker logs on console during debugging
-        # stream_handler = logging.StreamHandler()
-        # stream_handler.setFormatter(formatter)
-        # worker_logger.addHandler(stream_handler)
 
         # --- Use worker_logger for all subsequent logging within this method ---
         # Replace all `logger.` calls with `worker_logger.`
@@ -856,8 +850,8 @@ class Runner:
             if network is None:
                 raise Exception(f"Failed to start SUMO after {max_retries} attempts")
 
-            # Create environment
-            env = Environment(network)
+            # Create environment with data_queue
+            env = Environment(network, data_queue)
 
             # Create agents for traffic lights
             tls_ids = network.tls_ids
@@ -869,25 +863,30 @@ class Runner:
             for tls_id in tls_ids:
                 agent = agent_factory.create_agent(agent_type, tls_id, network) # Create first
                 if resume_flag:
-                    agent_state_path = run_manager.get_agent_state_path(run_id, tls_id)
-                    worker_logger.info(f"Attempting to load state for agent {tls_id} from {agent_state_path}")
-                    try:
-                        agent.load_state(agent_state_path) # Load state into existing agent
-                    except Exception as load_err:
-                         worker_logger.error(f"Failed to load state for agent {tls_id}, starting fresh for this agent: {load_err}")
-                         # Continue with the fresh agent instance
+                    agent_state_path = run_manager.get_agent_state_path(run_id, tls_id, agent_type)
+                    worker_logger.info(f"Attempting to load state for agent {agent_type} ({tls_id}) from {agent_state_path}")
+                    # Check if the specific agent's directory exists before loading
+                    if os.path.isdir(agent_state_path):
+                        try:
+                            agent.load_state(agent_state_path)
+                            worker_logger.info(f"Successfully loaded state for {agent_type} ({tls_id})")
+                        except Exception as load_err:
+                             worker_logger.error(f"Failed to load state for agent {agent_type} ({tls_id}) from existing path {agent_state_path}, starting fresh: {load_err}")
+                             # Agent instance is already fresh, just log the error
+                    else:
+                        worker_logger.warning(f"State directory not found for {agent_type} ({tls_id}) at {agent_state_path}. Starting fresh.")
                 agents[tls_id] = agent
 
             # --- Load Complete Run Metadata and Extract Early Termination Config ---
             metadata = run_manager.load_metadata(run_id)
             run_config = metadata.get('config', {})
             early_term_config = run_config.get('early_episode_termination', {
-                # Provide safe defaults if metadata is missing/old
-                'enabled': True,  # Default to disabled if missing
-                'max_step_wait_time': 300.0,
-                'max_step_queue_length': 40,
-                'min_steps_before_check': 100,
-                'termination_penalty': -100.0
+            # Provide safe defaults if metadata is missing/old
+            'enabled': True,
+            'max_step_wait_time': 120.0,  # DECREASE: Tolerate 2 minutes wait initially
+            'max_step_queue_length': 40,   # SLIGHT INCREASE: Tolerate slightly longer queues
+            'min_steps_before_check': 1, # DECREASE SIGNIFICANTLY: Give agent 1 step before checks
+            'termination_penalty': -50.0  # DECREASE: Make penalty less catastrophic initially
             })
             worker_logger.info(f"Early termination config: {early_term_config}")
 
@@ -905,6 +904,17 @@ class Runner:
                         progress_dict['status_message'] = f'Running ep {current_episode_number}'
                     except Exception as e:
                         worker_logger.warning(f"Failed to update progress dict: {e}")
+                    
+                    # Initialize data collection for Baseline agent diagnostics
+                    baseline_diagnostics = {}
+                    baseline_last_throughput = {}
+                    if agent_type == 'Baseline':
+                        # Initialize data structures for collecting statistics
+                        for tls_id in tls_ids:
+                            baseline_diagnostics[tls_id] = {
+                                'waiting_times': [],
+                                'throughputs': []
+                            }
 
                     # Reset environment
                     env.reset()
@@ -923,7 +933,13 @@ class Runner:
                                 actions[tls_id] = action
 
                         # Perform step in the environment with early termination config
-                        next_states, rewards, done = env.step(agents, early_term_config)
+                        # Pass agent_type and network_name to env.step
+                        next_states, rewards, done = env.step(
+                            agents,
+                            agent_type,      # Pass agent type
+                            network_name,    # Pass network name
+                            early_term_config
+                        )
 
                         # Process step data for each agent
                         for tls_id, agent in agents.items():
@@ -936,6 +952,23 @@ class Runner:
                                 waiting_time = sum(link['waiting_time'] for link in link_states)
                                 vehicle_count = sum(link['vehicle_count'] for link in link_states)
                                 queue_length = sum(link['queue_length'] for link in link_states)
+                                
+                                # Collect diagnostic data for Baseline agent
+                                if agent_type == 'Baseline':
+                                    # Calculate raw total waiting time (already calculated as waiting_time)
+                                    bl_total_waiting_time = waiting_time
+                                    
+                                    # Calculate step throughput for Baseline agent
+                                    current_count = network.get_departed_vehicles_count()
+                                    last_count = baseline_last_throughput.get(tls_id, current_count)
+                                    bl_step_throughput = max(0, current_count - last_count)
+                                    baseline_last_throughput[tls_id] = current_count
+                                    
+                                    # Store values instead of logging them - ensure key exists
+                                    if tls_id not in baseline_diagnostics:
+                                        baseline_diagnostics[tls_id] = {'waiting_times': [], 'throughputs': []}
+                                    baseline_diagnostics[tls_id]['waiting_times'].append(bl_total_waiting_time)
+                                    baseline_diagnostics[tls_id]['throughputs'].append(bl_step_throughput)
 
                                 # Create step data dictionary
                                 step_data_dict = {
@@ -959,36 +992,78 @@ class Runner:
 
                         step += 1
 
-                    # Handle episode completion
-                    if done or step >= max_steps:
-                        if not done and step >= max_steps:
-                            worker_logger.info(f"Episode {episode + 1} reached max steps without natural termination")
-
-                        # Calculate final episode metrics
-                        avg_waiting = np.mean(env.episode_metrics['waiting_times']) if env.episode_metrics['waiting_times'] else 0
-                        total_reward = sum(env.episode_metrics['rewards'])
-                        final_throughput = network.get_arrived_vehicles_count()
-
-                        # Get termination reason if available, or use a default
-                        termination_reason = 'max_steps' if (not done and step >= max_steps) else 'natural'
-
-                        # Create episode data dictionary with termination reason
-                        episode_data_dict = {
-                            'agent_type': agent_type,
-                            'network': network_name,
-                            'episode': env.episode_number,
-                            'avg_waiting': float(avg_waiting),
-                            'total_reward': float(total_reward),
-                            'total_steps': env.episode_step,
-                            'final_throughput': final_throughput,
-                            'termination_reason': termination_reason  # Include termination reason
-                        }
-
-                        # Put on data queue
-                        try:
-                            data_queue.put({'type': 'episode', **episode_data_dict})
-                        except Exception as q_err:
-                            worker_logger.error(f"Failed to put episode data on queue: {q_err}")
+                    # Log episode completion info
+                    if not done and step >= max_steps:
+                        worker_logger.info(f"Episode {episode + 1} reached max steps without natural termination")
+                    
+                    # Calculate and log summary statistics for Baseline agent
+                    if agent_type == 'Baseline':
+                        import numpy as np
+                        worker_logger.info(f"[BASELINE_SUMMARY] Episode:{current_episode_number} Steps:{step}")
+                        
+                        for tls_id, data in baseline_diagnostics.items():
+                            waiting_times = data['waiting_times']
+                            throughputs = data['throughputs']
+                            
+                            # Only calculate statistics if we have enough data points
+                            if len(waiting_times) > 1:
+                                # Calculate waiting time statistics
+                                wt_min = np.min(waiting_times)
+                                wt_max = np.max(waiting_times)
+                                wt_mean = np.mean(waiting_times)
+                                wt_median = np.median(waiting_times)
+                                wt_std = np.std(waiting_times)
+                                wt_p25 = np.percentile(waiting_times, 25)
+                                wt_p75 = np.percentile(waiting_times, 75)
+                                wt_p95 = np.percentile(waiting_times, 95)
+                                
+                                # Calculate histograms to understand distribution
+                                hist_bins = min(10, len(waiting_times) // 5)  # Reasonable number of bins
+                                if hist_bins > 1:
+                                    wt_hist, wt_bin_edges = np.histogram(waiting_times, bins=hist_bins)
+                                    wt_hist_str = ", ".join([f"{int(wt_hist[i])} in [{wt_bin_edges[i]:.1f}-{wt_bin_edges[i+1]:.1f})" for i in range(len(wt_hist))])
+                                    
+                                    # Add most frequent ranges
+                                    max_bin_idx = np.argmax(wt_hist)
+                                    wt_common_range = f"[{wt_bin_edges[max_bin_idx]:.1f}-{wt_bin_edges[max_bin_idx+1]:.1f})"
+                                else:
+                                    wt_hist_str = "insufficient data for histogram"
+                                    wt_common_range = f"[{wt_min:.1f}-{wt_max:.1f})"
+                                
+                                # Log waiting time summary
+                                worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} WaitTime: min={wt_min:.2f}, max={wt_max:.2f}, mean={wt_mean:.2f}, median={wt_median:.2f}, std={wt_std:.2f}, p25={wt_p25:.2f}, p75={wt_p75:.2f}, p95={wt_p95:.2f}")
+                                worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} WaitTime_Distribution: most_common_range={wt_common_range}, histogram={wt_hist_str}")
+                            
+                            # Only calculate throughput statistics if we have enough data points
+                            if len(throughputs) > 1:
+                                # Calculate throughput statistics
+                                tp_min = np.min(throughputs)
+                                tp_max = np.max(throughputs)
+                                tp_mean = np.mean(throughputs)
+                                tp_median = np.median(throughputs)
+                                tp_std = np.std(throughputs)
+                                tp_sum = np.sum(throughputs)
+                                tp_p75 = np.percentile(throughputs, 75)
+                                tp_p95 = np.percentile(throughputs, 95)
+                                
+                                # Calculate throughput distribution histogram
+                                hist_bins = min(10, len(throughputs) // 5)
+                                if hist_bins > 1:
+                                    tp_hist, tp_bin_edges = np.histogram(throughputs, bins=hist_bins)
+                                    tp_hist_str = ", ".join([f"{int(tp_hist[i])} in [{tp_bin_edges[i]:.1f}-{tp_bin_edges[i+1]:.1f})" for i in range(len(tp_hist))])
+                                    
+                                    # Add most frequent ranges
+                                    max_bin_idx = np.argmax(tp_hist)
+                                    tp_common_range = f"[{tp_bin_edges[max_bin_idx]:.1f}-{tp_bin_edges[max_bin_idx+1]:.1f})"
+                                else:
+                                    tp_hist_str = "insufficient data for histogram"
+                                    tp_common_range = f"[{tp_min:.1f}-{tp_max:.1f})"
+                                
+                                # Log throughput summary
+                                worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} Throughput: min={tp_min:.2f}, max={tp_max:.2f}, mean={tp_mean:.2f}, median={tp_median:.2f}, std={tp_std:.2f}, sum={tp_sum:.2f}, p75={tp_p75:.2f}, p95={tp_p95:.2f}")
+                                worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} Throughput_Distribution: most_common_range={tp_common_range}, histogram={tp_hist_str}")
+                    
+                    # Note: Episode data queuing is now handled in env.step when done=True
 
                     worker_logger.info(f"Run '{run_id}', Agent {agent_type}: Episode {current_episode_number} completed at step {step}.")
                     episodes_run_this_session += 1
@@ -1007,7 +1082,9 @@ class Runner:
                         worker_logger.info(f"Saving agent states for episode {current_episode_number}")
                         try:
                             for tls_id, agent in agents.items():
-                                agent_state_path = run_manager.get_agent_state_path(run_id, tls_id)
+                                agent_state_path = run_manager.get_agent_state_path(run_id, tls_id, agent_type)
+                                # Ensure the agent-specific directory exists before saving
+                                os.makedirs(agent_state_path, exist_ok=True)
                                 agent.save_state(agent_state_path)
                             worker_logger.info(f"Agent states saved successfully for episode {current_episode_number}")
                         except Exception as save_err:
