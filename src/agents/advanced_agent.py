@@ -357,6 +357,12 @@ class AdvancedAgent(Agent):
 
         # Performance tracking for adaptive exploration
         self.performance_history = deque(maxlen=20)  # Store last 20 rewards
+        
+        # Initialize running statistics for online normalization
+        self.stats_count = torch.tensor(0, device=self.device)
+        # Create tensors for each feature type: [queue_length, waiting_time, vehicle_count, time_since_last_change]
+        self.feature_means = torch.zeros(4, device=self.device)
+        self.feature_variances = torch.zeros(4, device=self.device)
 
     @classmethod
     def create(cls, tls_id, network, **kwargs):
@@ -374,13 +380,66 @@ class AdvancedAgent(Agent):
 
     def _preprocess_state(self, state):
         """Convert environment state dict to tensors for the neural network.
-        # ... (rest of implementation) ...
+        Applies online standardization to numerical features for improved learning stability.
         """
         # Extract link states and current signal state
         link_states = state.get('link_states', []) # Use .get for safety
         current_signal_state = state.get('current_signal_state', "")
 
-        # Convert link states to a tensor with additional features
+        # Collect all raw feature values first to update statistics
+        all_queue_lengths = []
+        all_waiting_times = []
+        all_vehicle_counts = []
+        all_time_since_changes = []
+
+        # First pass: collect features for statistics update
+        for link in link_states:
+            link_index = link.get('index', -1)
+            if link_index == -1 or link_index >= len(current_signal_state):
+                continue # Skip if index is invalid or out of bounds
+                
+            queue_length = float(link.get('queue_length', 0))
+            waiting_time = float(link.get('waiting_time', 0))
+            vehicle_count = float(link.get('vehicle_count', 0))
+            time_since_change = float(link.get('time_since_last_change', 0))
+            
+            all_queue_lengths.append(queue_length)
+            all_waiting_times.append(waiting_time)
+            all_vehicle_counts.append(vehicle_count)
+            all_time_since_changes.append(time_since_change)
+
+        # Update running statistics if we have data
+        if all_queue_lengths:  # Only update if we have data
+            # Convert collected data to tensors
+            queue_tensor = torch.tensor(all_queue_lengths, dtype=torch.float32, device=self.device)
+            waiting_tensor = torch.tensor(all_waiting_times, dtype=torch.float32, device=self.device)
+            vehicles_tensor = torch.tensor(all_vehicle_counts, dtype=torch.float32, device=self.device)
+            time_change_tensor = torch.tensor(all_time_since_changes, dtype=torch.float32, device=self.device)
+
+            # Update running statistics using Welford's algorithm
+            self.stats_count += 1
+            
+            # Queue length (index 0)
+            delta = queue_tensor.mean() - self.feature_means[0]
+            self.feature_means[0] += delta / self.stats_count
+            self.feature_variances[0] += delta * (queue_tensor.mean() - self.feature_means[0])
+            
+            # Waiting time (index 1)
+            delta = waiting_tensor.mean() - self.feature_means[1]
+            self.feature_means[1] += delta / self.stats_count
+            self.feature_variances[1] += delta * (waiting_tensor.mean() - self.feature_means[1])
+            
+            # Vehicle count (index 2)
+            delta = vehicles_tensor.mean() - self.feature_means[2]
+            self.feature_means[2] += delta / self.stats_count
+            self.feature_variances[2] += delta * (vehicles_tensor.mean() - self.feature_means[2])
+            
+            # Time since change (index 3)
+            delta = time_change_tensor.mean() - self.feature_means[3]
+            self.feature_means[3] += delta / self.stats_count
+            self.feature_variances[3] += delta * (time_change_tensor.mean() - self.feature_means[3])
+
+        # Second pass: process features with normalization and build final feature list
         link_features = []
 
         for link in link_states:
@@ -403,12 +462,46 @@ class AdvancedAgent(Agent):
                         # Normalize to range [-1, 1]
                         historical_trend = max(-1.0, min(1.0, historical_trend / 5.0))
 
-            # Use .get with defaults for safety
+            # Get raw feature values
+            queue_length = float(link.get('queue_length', 0))
+            waiting_time = float(link.get('waiting_time', 0))
+            vehicle_count = float(link.get('vehicle_count', 0))
+            time_since_change = float(link.get('time_since_last_change', 0))
+            
+            # Apply normalization with epsilon for numerical stability
+            # Only use standardization if we have enough samples
+            if self.stats_count > 1:
+                # Calculate standard deviation with small epsilon to avoid division by zero
+                epsilon = 1e-8
+                std_queue = torch.sqrt(self.feature_variances[0] / self.stats_count + epsilon)
+                std_waiting = torch.sqrt(self.feature_variances[1] / self.stats_count + epsilon)
+                std_vehicles = torch.sqrt(self.feature_variances[2] / self.stats_count + epsilon)
+                std_time_change = torch.sqrt(self.feature_variances[3] / self.stats_count + epsilon)
+                
+                # Normalize features
+                norm_queue = (queue_length - self.feature_means[0]) / std_queue
+                norm_waiting = (waiting_time - self.feature_means[1]) / std_waiting
+                norm_vehicles = (vehicle_count - self.feature_means[2]) / std_vehicles
+                norm_time_change = (time_since_change - self.feature_means[3]) / std_time_change
+                
+                # Clip to recommended range [-5.0, 5.0]
+                norm_queue = max(-5.0, min(5.0, norm_queue.item()))
+                norm_waiting = max(-5.0, min(5.0, norm_waiting.item()))
+                norm_vehicles = max(-5.0, min(5.0, norm_vehicles.item()))
+                norm_time_change = max(-5.0, min(5.0, norm_time_change.item()))
+            else:
+                # Fallback to basic scaling for the first few samples
+                norm_queue = queue_length / 30.0
+                norm_waiting = waiting_time / 1000.0
+                norm_vehicles = vehicle_count / 30.0
+                norm_time_change = time_since_change / 200.0
+            
+            # Assemble the feature vector
             features = [
-                link.get('queue_length', 0) / 30.0,
-                link.get('waiting_time', 0) / 1000.0,
-                link.get('vehicle_count', 0) / 30.0,
-                link.get('time_since_last_change', 0) / 200.0,
+                norm_queue,
+                norm_waiting,
+                norm_vehicles,
+                norm_time_change,
                 is_green,
                 historical_trend
             ]
@@ -416,9 +509,9 @@ class AdvancedAgent(Agent):
 
             # Update traffic history for this link
             self.traffic_history[link_index].append({
-                'queue_length': link.get('queue_length', 0),
-                'waiting_time': link.get('waiting_time', 0),
-                'vehicle_count': link.get('vehicle_count', 0)
+                'queue_length': queue_length,
+                'waiting_time': waiting_time,
+                'vehicle_count': vehicle_count
             })
 
         # Pad to max_links if necessary
@@ -863,14 +956,15 @@ class AdvancedAgent(Agent):
             adv_logger.info(f"Updating target network at step {self.train_step}")
             self.target_model.load_state_dict(self.model.state_dict())
 
-    # --- DELTA-BASED REWARD FUNCTION ---
+    # --- SIMPLIFIED REWARD FUNCTION ---
     def calculate_reward(self, state, action, next_state):
         """
-        Calculate delta-based reward focusing on change in total waiting time
-        and per-step throughput, using estimated normalization constants.
+        Calculate reward based on the total waiting time across all lanes.
+        This simplified reward function uses the negative sum of waiting times,
+        scaled to a reasonable range for stable learning.
 
         Args:
-            state: Previous state dictionary (expected to be available via self.last_state).
+            state: Previous state dictionary.
             action: Action taken tuple (link_index, new_state).
             next_state: Resulting state dictionary.
 
@@ -878,92 +972,36 @@ class AdvancedAgent(Agent):
             Tuple[float, Dict[str, float]]: Calculated reward and its components.
         """
         # --- Input Validation ---
-        # Access previous state via self.last_state, set in choose_action/learn loop
-        if action is None or self.last_state is None or not isinstance(self.last_state, dict) \
-           or next_state is None or not isinstance(next_state, dict):
-            # Use the agent's logger if available, otherwise print
+        if action is None or not isinstance(next_state, dict):
             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
-            logger_instance.warning(f"Missing state/action for reward calc (TLS: {self.tls_id}). Action: {action}, Last State Type: {type(self.last_state)}, Next State Type: {type(next_state)}")
+            logger_instance.warning(f"Missing state/action for reward calc (TLS: {self.tls_id})")
             return 0.0, {}
 
-        previous_link_states = self.last_state.get('link_states', [])
-        current_link_states = next_state.get('link_states', [])
+        # Get link states from next_state
+        link_states = next_state.get('link_states', [])
+        if not link_states:
+            return 0.0, {}
 
-        # Handle cases where link_states might be missing in one state but not the other
-        if not previous_link_states and not current_link_states:
-             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
-             logger_instance.warning(f"Missing link_states in both prev/curr states for reward calc (TLS: {self.tls_id}).")
-             return 0.0, {}
-        # Ensure lists exist even if empty for sum()
-        previous_link_states = previous_link_states or []
-        current_link_states = current_link_states or []
+        # Calculate total waiting time (sum of all link waiting times)
+        total_waiting_time = sum(link.get('waiting_time', 0.0) for link in link_states)
 
+        # Scale the reward to a reasonable range
+        # Typical waiting times can be in hundreds to thousands of seconds
+        # We aim for rewards roughly in the range [-10, 0]
+        SCALE_FACTOR = 500.0  # Adjust based on typical waiting times in the network
 
-        # --- Define Normalization Constants Based on Diagnostics ---
-        # Estimated max absolute change in total wait time across all agent links in one step
-        MAX_ABS_DELTA_WAIT_TIME = 500.0
-        # Estimated max network-wide vehicles processed in one agent step
-        MAX_STEP_THROUGHPUT = 10.0
-        # Small epsilon to prevent division by zero
-        EPSILON = 1e-6
+        # Calculate reward (negative waiting time)
+        reward = -total_waiting_time / SCALE_FACTOR
 
-        # --- Metric Calculation ---
-        # Delta Waiting Time
-        previous_total_waiting_time = sum(link.get('waiting_time', 0.0) for link in previous_link_states)
-        current_total_waiting_time = sum(link.get('waiting_time', 0.0) for link in current_link_states)
-        # Positive value means waiting time decreased (improvement)
-        delta_waiting_time = previous_total_waiting_time - current_total_waiting_time
-
-        # Step Throughput (Network-wide)
-        current_cumulative_throughput = 0
-        if hasattr(self.network, 'get_departed_vehicles_count') and callable(self.network.get_departed_vehicles_count):
-             current_cumulative_throughput = self.network.get_departed_vehicles_count()
-        else:
-             # Use logger instance
-             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
-             logger_instance.warning("Network object or get_departed_vehicles_count method not available for throughput calculation.")
-        # Ensure _last_throughput exists, initialize if not (e.g., first call)
-        if not hasattr(self, '_last_throughput'):
-             self._last_throughput = current_cumulative_throughput # Initialize based on current value first time
-        step_throughput = max(0.0, float(current_cumulative_throughput - self._last_throughput))
-        # Update for the next step's calculation
-        self._last_throughput = current_cumulative_throughput
-
-        # --- Normalization ---
-        # Normalize delta waiting time - result in [-1, 1]
-        norm_delta_wait = delta_waiting_time / (MAX_ABS_DELTA_WAIT_TIME + EPSILON)
-        norm_delta_wait = max(-1.0, min(1.0, norm_delta_wait)) # Clip to handle estimate errors
-
-        # Normalize step throughput - result in [0, 1]
-        norm_throughput = step_throughput / (MAX_STEP_THROUGHPUT + EPSILON)
-        norm_throughput = min(1.0, norm_throughput) # Clip (can't be less than 0 due to max(0,...) above)
-
-        # --- Component Weights ---
-        W_DELTA_WAIT = 1.0    # Weight for waiting time improvement
-        W_THROUGHPUT = 0.3    # Weight for throughput (adjust relative importance)
-
-        # --- Calculate Reward ---
-        delta_wait_component = norm_delta_wait * W_DELTA_WAIT
-        throughput_component = norm_throughput * W_THROUGHPUT
-
-        total_reward = delta_wait_component + throughput_component
-
-        # --- Store components for analysis ---
+        # Return reward and components for analysis
         components = {
-            'delta_wait_comp': delta_wait_component,
-            'throughput_comp': throughput_component,
-            # Raw values for debugging/analysis
-            'raw_delta_wait': delta_waiting_time,
-            'raw_step_throughput': step_throughput,
-            'raw_prev_wait': previous_total_waiting_time,
-            'raw_curr_wait': current_total_waiting_time,
+            'total_waiting_time': total_waiting_time,
+            'raw_reward': -total_waiting_time,
+            'scaled_reward': reward
         }
 
-        # Note: self.last_state should be updated externally in the training loop
-        # after calling agent.learn() which uses this reward function.
-
-        return total_reward, components
-    # --- END DELTA-BASED REWARD FUNCTION ---
+        return reward, components
+    # --- END SIMPLIFIED REWARD FUNCTION ---
 
     # --- save_state and load_state methods ---
     def save_state(self, directory_path: str):
@@ -975,12 +1013,20 @@ class AdvancedAgent(Agent):
         target_model_path = os.path.join(directory_path, 'target_model.pth')
         optimizer_path = os.path.join(directory_path, 'optimizer.pth')
         hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        normalization_path = os.path.join(directory_path, 'normalization.pth')
 
         try:
             # Save models and optimizer
             torch.save(self.model.state_dict(), model_path)
             torch.save(self.target_model.state_dict(), target_model_path)
             torch.save(self.optimizer.state_dict(), optimizer_path)
+            
+            # Save normalization statistics
+            torch.save({
+                'stats_count': self.stats_count,
+                'feature_means': self.feature_means,
+                'feature_variances': self.feature_variances
+            }, normalization_path)
 
             # Save hyperparameters and other relevant state
             hyperparams = {
@@ -1017,6 +1063,7 @@ class AdvancedAgent(Agent):
         target_model_path = os.path.join(directory_path, 'target_model.pth')
         optimizer_path = os.path.join(directory_path, 'optimizer.pth')
         hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
+        normalization_path = os.path.join(directory_path, 'normalization.pth')
 
         # Check if essential files exist
         required_files = [model_path, target_model_path, optimizer_path, hyperparams_path]
@@ -1041,17 +1088,17 @@ class AdvancedAgent(Agent):
             # Load learning rate first
             loaded_alpha = self.alpha # Default to current alpha
             try:
-                 with open(hyperparams_path, 'r') as f:
-                     loaded_params = json.load(f)
-                     loaded_alpha = loaded_params.get('alpha', self.alpha)
+                with open(hyperparams_path, 'r') as f:
+                    loaded_params = json.load(f)
+                    loaded_alpha = loaded_params.get('alpha', self.alpha)
             except Exception as e:
-                 adv_logger.warning(f"Could not read alpha from hyperparams file, using current: {e}")
+                adv_logger.warning(f"Could not read alpha from hyperparams file, using current: {e}")
 
             # Re-initialize optimizer with potentially loaded learning rate
             self.optimizer = optim.Adam(self.model.parameters(), lr=loaded_alpha, weight_decay=1e-5)
             # Now load the saved state dict
             self.optimizer.load_state_dict(torch.load(optimizer_path))
-            adv_logger.info(f"Optimizer state loaded (re-initialized with alpha={loaded_alpha}).")
+            adv_logger.info(f"Optimizer state loaded (re-initialized with alpha={loaded_alpha}).") 
 
 
             # Load hyperparameters from JSON
@@ -1068,6 +1115,27 @@ class AdvancedAgent(Agent):
                 # Load PER params
                 self.priority_alpha = hyperparams.get('priority_alpha', self.priority_alpha)
                 self.priority_beta = hyperparams.get('priority_beta', self.priority_beta) # Load saved beta
+            
+            # Load normalization statistics if they exist
+            if os.path.exists(normalization_path):
+                try:
+                    norm_stats = torch.load(normalization_path, map_location=device)
+                    self.stats_count = norm_stats['stats_count']
+                    self.feature_means = norm_stats['feature_means']
+                    self.feature_variances = norm_stats['feature_variances']
+                    adv_logger.info(f"Loaded normalization statistics: count={self.stats_count}")
+                except Exception as e:
+                    adv_logger.warning(f"Error loading normalization statistics: {e}")
+                    # Initialize fresh statistics
+                    self.stats_count = torch.tensor(0, device=device)
+                    self.feature_means = torch.zeros(4, device=device)
+                    self.feature_variances = torch.zeros(4, device=device)
+            else:
+                adv_logger.info("No normalization statistics found, initializing fresh ones")
+                # Initialize fresh statistics
+                self.stats_count = torch.tensor(0, device=device)
+                self.feature_means = torch.zeros(4, device=device)
+                self.feature_variances = torch.zeros(4, device=device)
 
             # Set model modes correctly after loading
             self.model.train()
