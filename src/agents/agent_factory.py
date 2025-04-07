@@ -1,5 +1,6 @@
 # agents/agent_factory.py
 from typing import Dict, Any, Type, Callable, List, Optional
+from src.utils.conflict_detector import ConflictDetector
 
 from .agent import Agent
 from .q_agent import QAgent
@@ -7,6 +8,7 @@ from .dqn_agent import DQNAgent
 from .advanced_agent import AdvancedAgent
 from .enhanced_agent import EnhancedAgent
 from .no_agent import NoAgent
+from .revised_agent import RevisedAgent  # Import the new RevisedAgent
 
 
 class AgentFactory:
@@ -19,6 +21,7 @@ class AgentFactory:
             "DQN": DQNAgent,
             "Advanced": AdvancedAgent, 
             "Enhanced": EnhancedAgent,
+            "Revised": RevisedAgent,  # Add the new agent type
             "Baseline": NoAgent
         }
         
@@ -33,10 +36,17 @@ class AgentFactory:
                 "epsilon": 0.9,              # Very high exploration rate
                 "epsilon_decay": 0.9999,     # Very slow decay for exploration
                 "epsilon_min": 0.2           # Higher minimum for exploration
+            },
+            "Revised": {
+                "epsilon": 1.0,              # Start with 100% exploration
+                "epsilon_decay": 0.9995,     # Slower decay
+                "epsilon_min": 0.1,          # Higher minimum exploration
+                "alpha": 0.001,              # Higher learning rate
+                "debug_interval": 50         # Log debug info every 50 steps
             }
         }
 
-    def create_agent(self, agent_type: str, tls_id: str, network, **kwargs) -> Agent:
+    def create_agent(self, agent_type: str, tls_id: str, network, conflict_detector: Optional[ConflictDetector] = None, **kwargs) -> Agent:
         """Create an agent of the specified type.
 
         Args:
@@ -60,25 +70,40 @@ class AgentFactory:
         # Apply default configuration if available
         config = kwargs.copy()
         if agent_type in self.agent_configs:
-            config.update(self.agent_configs[agent_type])
+            # Start with default configs
+            default_config = self.agent_configs[agent_type].copy()
+            # Override defaults with any provided kwargs
+            default_config.update(config)
+            config = default_config
         
-        # Let each agent configure itself
-        return agent_class.create(tls_id, network, **config)
+        # Check if agent requires a conflict detector
+        if agent_type in ["Advanced", "Enhanced", "Revised"]:  # Add Revised to the list
+            if conflict_detector is None:
+                raise ValueError(f"ConflictDetector is required for agent type '{agent_type}' but was not provided.")
+            # Pass the conflict detector to the agent
+            return agent_class.create(tls_id, network, conflict_detector=conflict_detector, **config)
+        else:
+            # For agents that don't need the conflict detector
+            return agent_class.create(tls_id, network, **config)
 
-    def create_agents_for_network(self, agent_type: str, network) -> Dict[str, Agent]:
+    def create_agents_for_network(self, agent_type: str, network, conflict_detector: Optional[ConflictDetector] = None) -> Dict[str, Agent]:
         """Create agents for all traffic lights in a network.
 
         Args:
             agent_type: Type of agent to create
             network: Network object providing access to simulation data
+            conflict_detector: ConflictDetector instance for agents that need it
 
         Returns:
             Dictionary mapping traffic light IDs to agent instances
+            
+        Raises:
+            ValueError: If a required conflict_detector is not provided for agents that need it
         """
         agents = {}
 
         for tls_id in network.tls_ids:
-            agents[tls_id] = self.create_agent(agent_type, tls_id, network)
+            agents[tls_id] = self.create_agent(agent_type, tls_id, network, conflict_detector=conflict_detector)
 
         return agents
 
@@ -96,12 +121,16 @@ def create_dqn_agent(tls_id, network, **kwargs):
     return agent_factory.create_agent("DQN", tls_id, network, **kwargs)
 
 
-def create_advanced_agent(tls_id, network, **kwargs):
-    return agent_factory.create_agent("Advanced", tls_id, network, **kwargs)
+def create_advanced_agent(tls_id, network, conflict_detector=None, **kwargs):
+    return agent_factory.create_agent("Advanced", tls_id, network, conflict_detector=conflict_detector, **kwargs)
 
 
-def create_enhanced_agent(tls_id, network, **kwargs):
-    return agent_factory.create_agent("Enhanced", tls_id, network, **kwargs)
+def create_enhanced_agent(tls_id, network, conflict_detector=None, **kwargs):
+    return agent_factory.create_agent("Enhanced", tls_id, network, conflict_detector=conflict_detector, **kwargs)
+
+
+def create_revised_agent(tls_id, network, conflict_detector=None, **kwargs):
+    return agent_factory.create_agent("Revised", tls_id, network, conflict_detector=conflict_detector, **kwargs)
 
 
 def no_agent(tls_id, network, **kwargs):

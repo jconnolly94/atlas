@@ -199,6 +199,7 @@ class Runner:
             "Q-Learning",  # Using lane-level control by default
             "DQN",         # Using lane-level control by default
             "Advanced",
+            "Revised",  # New agent type
             "Enhanced",
             "Baseline"
         ]
@@ -841,6 +842,16 @@ class Runner:
                         raise Exception("Failed to start SUMO")
 
                     worker_logger.info(f"Successfully connected to SUMO on port {port}")
+
+                    # Instantiate ConflictDetector
+                    try:
+                        from src.utils.conflict_detector import ConflictDetector
+                        conflict_detector = ConflictDetector(network.sumo_config_file)
+                        worker_logger.info(f"Successfully initialized ConflictDetector for network: {network_name}")
+                    except Exception as detector_err:
+                        worker_logger.error(f"Failed to initialize ConflictDetector: {detector_err}", exc_info=True)
+                        raise RuntimeError(f"Critical error: Failed to initialize ConflictDetector: {detector_err}")
+
                     break
                 except Exception as e:
                     worker_logger.error(f"Port {port} connection failed: {str(e)}")
@@ -861,7 +872,7 @@ class Runner:
             from agents.agent_factory import agent_factory # Import locally
             agents = {}
             for tls_id in tls_ids:
-                agent = agent_factory.create_agent(agent_type, tls_id, network) # Create first
+                agent = agent_factory.create_agent(agent_type, tls_id, network, conflict_detector=conflict_detector)
                 if resume_flag:
                     agent_state_path = run_manager.get_agent_state_path(run_id, tls_id, agent_type)
                     worker_logger.info(f"Attempting to load state for agent {agent_type} ({tls_id}) from {agent_state_path}")
@@ -904,7 +915,7 @@ class Runner:
                         progress_dict['status_message'] = f'Running ep {current_episode_number}'
                     except Exception as e:
                         worker_logger.warning(f"Failed to update progress dict: {e}")
-                    
+
                     # Initialize data collection for Baseline agent diagnostics
                     baseline_diagnostics = {}
                     baseline_last_throughput = {}
@@ -952,18 +963,18 @@ class Runner:
                                 waiting_time = sum(link['waiting_time'] for link in link_states)
                                 vehicle_count = sum(link['vehicle_count'] for link in link_states)
                                 queue_length = sum(link['queue_length'] for link in link_states)
-                                
+
                                 # Collect diagnostic data for Baseline agent
                                 if agent_type == 'Baseline':
                                     # Calculate raw total waiting time (already calculated as waiting_time)
                                     bl_total_waiting_time = waiting_time
-                                    
+
                                     # Calculate step throughput for Baseline agent
                                     current_count = network.get_departed_vehicles_count()
                                     last_count = baseline_last_throughput.get(tls_id, current_count)
                                     bl_step_throughput = max(0, current_count - last_count)
                                     baseline_last_throughput[tls_id] = current_count
-                                    
+
                                     # Store values instead of logging them - ensure key exists
                                     if tls_id not in baseline_diagnostics:
                                         baseline_diagnostics[tls_id] = {'waiting_times': [], 'throughputs': []}
@@ -995,16 +1006,16 @@ class Runner:
                     # Log episode completion info
                     if not done and step >= max_steps:
                         worker_logger.info(f"Episode {episode + 1} reached max steps without natural termination")
-                    
+
                     # Calculate and log summary statistics for Baseline agent
                     if agent_type == 'Baseline':
                         import numpy as np
                         worker_logger.info(f"[BASELINE_SUMMARY] Episode:{current_episode_number} Steps:{step}")
-                        
+
                         for tls_id, data in baseline_diagnostics.items():
                             waiting_times = data['waiting_times']
                             throughputs = data['throughputs']
-                            
+
                             # Only calculate statistics if we have enough data points
                             if len(waiting_times) > 1:
                                 # Calculate waiting time statistics
@@ -1016,24 +1027,24 @@ class Runner:
                                 wt_p25 = np.percentile(waiting_times, 25)
                                 wt_p75 = np.percentile(waiting_times, 75)
                                 wt_p95 = np.percentile(waiting_times, 95)
-                                
+
                                 # Calculate histograms to understand distribution
                                 hist_bins = min(10, len(waiting_times) // 5)  # Reasonable number of bins
                                 if hist_bins > 1:
                                     wt_hist, wt_bin_edges = np.histogram(waiting_times, bins=hist_bins)
                                     wt_hist_str = ", ".join([f"{int(wt_hist[i])} in [{wt_bin_edges[i]:.1f}-{wt_bin_edges[i+1]:.1f})" for i in range(len(wt_hist))])
-                                    
+
                                     # Add most frequent ranges
                                     max_bin_idx = np.argmax(wt_hist)
                                     wt_common_range = f"[{wt_bin_edges[max_bin_idx]:.1f}-{wt_bin_edges[max_bin_idx+1]:.1f})"
                                 else:
                                     wt_hist_str = "insufficient data for histogram"
                                     wt_common_range = f"[{wt_min:.1f}-{wt_max:.1f})"
-                                
+
                                 # Log waiting time summary
                                 worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} WaitTime: min={wt_min:.2f}, max={wt_max:.2f}, mean={wt_mean:.2f}, median={wt_median:.2f}, std={wt_std:.2f}, p25={wt_p25:.2f}, p75={wt_p75:.2f}, p95={wt_p95:.2f}")
                                 worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} WaitTime_Distribution: most_common_range={wt_common_range}, histogram={wt_hist_str}")
-                            
+
                             # Only calculate throughput statistics if we have enough data points
                             if len(throughputs) > 1:
                                 # Calculate throughput statistics
@@ -1045,24 +1056,24 @@ class Runner:
                                 tp_sum = np.sum(throughputs)
                                 tp_p75 = np.percentile(throughputs, 75)
                                 tp_p95 = np.percentile(throughputs, 95)
-                                
+
                                 # Calculate throughput distribution histogram
                                 hist_bins = min(10, len(throughputs) // 5)
                                 if hist_bins > 1:
                                     tp_hist, tp_bin_edges = np.histogram(throughputs, bins=hist_bins)
                                     tp_hist_str = ", ".join([f"{int(tp_hist[i])} in [{tp_bin_edges[i]:.1f}-{tp_bin_edges[i+1]:.1f})" for i in range(len(tp_hist))])
-                                    
+
                                     # Add most frequent ranges
                                     max_bin_idx = np.argmax(tp_hist)
                                     tp_common_range = f"[{tp_bin_edges[max_bin_idx]:.1f}-{tp_bin_edges[max_bin_idx+1]:.1f})"
                                 else:
                                     tp_hist_str = "insufficient data for histogram"
                                     tp_common_range = f"[{tp_min:.1f}-{tp_max:.1f})"
-                                
+
                                 # Log throughput summary
                                 worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} Throughput: min={tp_min:.2f}, max={tp_max:.2f}, mean={tp_mean:.2f}, median={tp_median:.2f}, std={tp_std:.2f}, sum={tp_sum:.2f}, p75={tp_p75:.2f}, p95={tp_p95:.2f}")
                                 worker_logger.info(f"[BASELINE_DIAG] Episode:{current_episode_number} TLS:{tls_id} Throughput_Distribution: most_common_range={tp_common_range}, histogram={tp_hist_str}")
-                    
+
                     # Note: Episode data queuing is now handled in env.step when done=True
 
                     worker_logger.info(f"Run '{run_id}', Agent {agent_type}: Episode {current_episode_number} completed at step {step}.")

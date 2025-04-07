@@ -72,7 +72,7 @@ class RunManager:
 
         try:
             os.makedirs(run_path, exist_ok=False) # Error if run_id somehow exists
-            os.makedirs(agent_dir)
+            os.makedirs(agent_dir) # Create base 'agents' dir
             os.makedirs(data_dir)
             os.makedirs(log_dir)
             logger.info(f"Created directory structure for run '{run_id}' at {run_path}")
@@ -84,10 +84,10 @@ class RunManager:
             if 'early_episode_termination' not in config_copy:
                 config_copy['early_episode_termination'] = {
                     'enabled': True,
-                    'max_step_wait_time': 300.0,  # Max wait time on any single link (seconds)
+                    'max_step_wait_time': 120.0,  # Max wait time on any single link (seconds)
                     'max_step_queue_length': 40,   # Max halting vehicles on any single link
-                    'min_steps_before_check': 100, # Min steps into episode before checks active
-                    'termination_penalty': -100.0  # Default penalty reward on early termination
+                    'min_steps_before_check': 1, # Min steps into episode before checks active
+                    'termination_penalty': -50.0  # Default penalty reward on early termination
                 }
             
             metadata = {
@@ -122,20 +122,26 @@ class RunManager:
         """
         return os.path.join(self.base_run_dir, run_id)
 
-    def get_agent_state_path(self, run_id: str, tls_id: str) -> str:
+    def get_agent_state_path(self, run_id: str, tls_id: str, agent_type: str) -> str:
         """
-        Constructs the path for storing/loading a specific agent's state within a run.
+        Constructs the path for storing/loading a specific agent's state within a run,
+        including the agent type.
 
         Args:
             run_id: The unique identifier of the run.
             tls_id: The identifier of the traffic light (agent).
+            agent_type: The type of the agent (e.g., "DQN", "Advanced").
 
         Returns:
             The path to the directory where the agent's state should be saved/loaded.
         """
-        # Sanitize tls_id for use as a directory name
+        # Sanitize tls_id and agent_type for use as directory names
         safe_tls_id = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in tls_id)
-        return os.path.join(self.get_run_path(run_id), 'agents', safe_tls_id)
+        # Agent types like "Q-Learning" need sanitization
+        safe_agent_type = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in agent_type)
+
+        # Construct the full path: base_run_dir / run_id / agents / agent_type / tls_id
+        return os.path.join(self.get_run_path(run_id), 'agents', safe_agent_type, safe_tls_id)
 
     def save_metadata(self, run_id: str, metadata: Dict[str, Any]) -> None:
         """
@@ -212,7 +218,6 @@ class RunManager:
                     metadata['last_completed_episode'] = last_episode
             metadata['last_update_time'] = datetime.now().isoformat()
             self.save_metadata(run_id, metadata)
-            logger.info(f"Updated status for run '{run_id}' to '{status}', last episode: {metadata.get('last_completed_episode')}")
         else:
             logger.warning(f"Could not update status for run '{run_id}': Metadata not found.")
 

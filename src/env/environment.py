@@ -185,7 +185,7 @@ class Environment(Observable):
                     max_queue = max(max_queue, link_state.get('queue_length', 0))
             
             # Check termination conditions
-            if max_wait > early_term_config.get('max_step_wait_time', 120.0):
+            if max_wait > early_term_config.get('max_step_wait_time', 300.0):
                 early_termination_reason = f"Max wait time exceeded ({max_wait:.1f}s)"
             elif max_queue > early_term_config.get('max_step_queue_length', 40):
                 early_termination_reason = f"Max queue length exceeded ({max_queue})"

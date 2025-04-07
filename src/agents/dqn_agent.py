@@ -107,10 +107,10 @@ class DQNSignalStateEncoder(nn.Module):
 
 
 class TrafficNetworkDQN(nn.Module):
-    """Deep Q-Network for traffic signal control."""
+    """Deep Q-Network for traffic signal control with a simplified architecture."""
 
     def __init__(self, max_links=16, link_dim=5, output_dim=2):
-        """Initialize network architecture.
+        """Initialize simplified network architecture.
 
         Args:
             max_links: Maximum number of links to support
@@ -119,31 +119,27 @@ class TrafficNetworkDQN(nn.Module):
         """
         super(TrafficNetworkDQN, self).__init__()
         
-        # Embedding dimensions
-        self.link_embedding_dim = 8
+        # Simplified architecture with larger embedding dimension
+        self.link_embedding_dim = 16
         self.signal_embedding_dim = 8
         self.max_links = max_links
         
-        # Encoders
+        # Use the existing encoders but with larger dimensions for link embedding
         self.link_encoder = DQNLinkEncoder(link_dim, self.link_embedding_dim)
         self.signal_encoder = DQNSignalStateEncoder(self.signal_embedding_dim)
         
-        # Link selection network
+        # Simplified link selection network with fewer layers but more units
         self.link_selector = nn.Sequential(
-            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 32),
+            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1)  # Scores for each link
+            nn.Linear(64, 1)  # Scores for each link
         )
         
-        # Action selection network (what state to set the link to)
+        # Simplified action selection network
         self.action_selector = nn.Sequential(
-            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 32),
+            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, output_dim)  # Q-values for each possible state (G, r)
+            nn.Linear(64, output_dim)  # Q-values for each possible state (G, r)
         )
 
     def forward(self, link_features, signal_state):
@@ -221,16 +217,16 @@ class TrafficNetworkDQN(nn.Module):
 class DQNAgent(Agent):
     """Agent using Deep Q-Learning for traffic signal control."""
     
-    # Default configuration
+    # Default configuration - adjusted for better learning
     DEFAULT_CONFIG = {
-        "alpha": 0.001,           # Learning rate
-        "gamma": 0.95,            # Discount factor
-        "epsilon": 0.9,           # High exploration rate
-        "epsilon_decay": 0.9999,  # Very slow decay to keep exploring longer
-        "epsilon_min": 0.2,       # Higher minimum to maintain some exploration
-        "batch_size": 32,
-        "memory_size": 20000,     # Large memory for diverse experiences
-        "target_update_freq": 200  # Less frequent updates for stability
+        "alpha": 0.005,           # Higher learning rate for faster adaptation
+        "gamma": 0.95,            # Same discount factor
+        "epsilon": 1.0,           # Start with full exploration 
+        "epsilon_decay": 0.995,   # Faster epsilon decay to start exploiting learned policy sooner
+        "epsilon_min": 0.05,      # Lower minimum to favor exploitation in later stages
+        "batch_size": 64,         # Larger batch size for more stable gradient estimates
+        "memory_size": 10000,     # Smaller but adequate memory for faster convergence
+        "target_update_freq": 50  # More frequent target updates for faster learning
     }
 
     def __init__(self, tls_id, network, alpha=0.001, gamma=0.95, epsilon=0.9,
@@ -286,6 +282,20 @@ class DQNAgent(Agent):
 
         # Track last action for reward calculation
         self.last_action = None
+        
+        # For improvement-based reward calculation
+        self._prev_throughput = 0
+        
+        # Debugging metrics
+        self.debug_stats = {
+            'avg_reward': 0,
+            'avg_loss': 0,
+            'avg_q_value': 0,
+            'exploration_rate': self.epsilon,
+            'episode_rewards': []
+        }
+        self.debug_count = 0
+        self.debug_interval = 100  # Log debug info every 100 steps
         
     @classmethod
     def create(cls, tls_id, network, **kwargs):
@@ -652,7 +662,7 @@ class DQNAgent(Agent):
         self._replay()
 
     def _replay(self):
-        """Perform experience replay and network updates."""
+        """Perform experience replay and network updates with improved tracking."""
         # Sample random batch from memory
         minibatch = random.sample(self.memory, self.batch_size)
 
@@ -747,12 +757,23 @@ class DQNAgent(Agent):
         self.train_step += 1
         if self.train_step % self.target_update_freq == 0:
             self.target_model.load_state_dict(self.model.state_dict())
+            
+        # Update debugging metrics
+        self.debug_stats['avg_reward'] = (self.debug_stats['avg_reward'] * self.debug_count + rewards_tensor.mean().item()) / (self.debug_count + 1)
+        self.debug_stats['avg_loss'] = (self.debug_stats['avg_loss'] * self.debug_count + loss.item()) / (self.debug_count + 1)
+        self.debug_stats['avg_q_value'] = (self.debug_stats['avg_q_value'] * self.debug_count + current_q.mean().item()) / (self.debug_count + 1)
+        self.debug_stats['exploration_rate'] = self.epsilon
+        self.debug_count += 1
+        
+        # Log debug info periodically
+        if self.debug_count % self.debug_interval == 0:
+            dqn_logger.info(f"TLS {self.tls_id} - Training stats: epsilon={self.epsilon:.4f}, avg_reward={self.debug_stats['avg_reward']:.4f}, avg_q={self.debug_stats['avg_q_value']:.4f}, loss={self.debug_stats['avg_loss']:.4f}")
 
     def calculate_reward(self, state, action, next_state):
-        """Calculate reward for taking an action.
+        """Calculate reward based on state changes and improvements.
         
-        Focuses purely on outcomes without encoding assumptions about
-        "good" signal patterns.
+        This improved reward function measures changes between states rather than
+        absolute values, providing clearer feedback about action impacts.
         
         Args:
             state: Previous enhanced state
@@ -768,65 +789,84 @@ class DQNAgent(Agent):
             
         link_index, new_state = action
         
-        # Get metrics for all links
-        next_link_states = next_state['link_states']
+        # Extract states
+        prev_link_states = state.get('link_states', [])
+        next_link_states = next_state.get('link_states', [])
         
-        # Find the specific link that was changed
-        target_link = None
-        for link in next_link_states:
-            if link['index'] == link_index:
-                target_link = link
+        # Find the specific link that was changed in both states
+        prev_target_link = None
+        next_target_link = None
+        
+        for link in prev_link_states:
+            if link.get('index') == link_index:
+                prev_target_link = link
                 break
                 
-        if not target_link:
+        for link in next_link_states:
+            if link.get('index') == link_index:
+                next_target_link = link
+                break
+                
+        if not prev_target_link or not next_target_link:
             return 0.0, {}  # Link not found
         
-        # Metrics for the targeted link
-        target_waiting_time = target_link['waiting_time']
-        target_queue_length = target_link['queue_length']
+        # Calculate CHANGES in metrics (improvement-based)
+        # For waiting times and queues, a decrease is an improvement (positive reward)
+        waiting_time_change = prev_target_link.get('waiting_time', 0) - next_target_link.get('waiting_time', 0)
+        queue_length_change = prev_target_link.get('queue_length', 0) - next_target_link.get('queue_length', 0)
         
-        # Overall metrics across all links
-        total_waiting_time = sum(link['waiting_time'] for link in next_link_states)
-        max_queue_length = max((link['queue_length'] for link in next_link_states), default=0)
-        total_throughput = self.network.get_departed_vehicles_count()
+        # Calculate total metrics changes across all links
+        prev_total_waiting = sum(link.get('waiting_time', 0) for link in prev_link_states)
+        next_total_waiting = sum(link.get('waiting_time', 0) for link in next_link_states)
+        total_waiting_change = prev_total_waiting - next_total_waiting
         
-        # Normalization constants
-        MAX_WAITING_TIME = 500.0
-        MAX_QUEUE_LENGTH = 20.0
-        MAX_THROUGHPUT = 25.0
+        # Get throughput change
+        prev_throughput = getattr(self, '_prev_throughput', 0)
+        current_throughput = self.network.get_departed_vehicles_count()
+        throughput_change = current_throughput - prev_throughput
+        self._prev_throughput = current_throughput  # Store for next calculation
         
-        # Normalize metrics
-        norm_target_waiting = min(1.0, target_waiting_time / MAX_WAITING_TIME)
-        norm_total_waiting = min(1.0, total_waiting_time / (MAX_WAITING_TIME * len(next_link_states)))
-        norm_max_queue = min(1.0, max_queue_length / MAX_QUEUE_LENGTH)
-        norm_throughput = min(1.0, total_throughput / MAX_THROUGHPUT)
+        # Scale factors (adjusted to create stronger signals)
+        WAITING_TIME_SCALE = 0.05   # Per second of waiting time change
+        QUEUE_LENGTH_SCALE = 0.5    # Per vehicle change in queue
+        THROUGHPUT_SCALE = 1.0      # Per vehicle increase in throughput
         
-        # Component weights
-        W_TARGET_WAITING = 0.3    # Waiting time for target link
-        W_TOTAL_WAITING = 0.3     # Total waiting time across all links
-        W_THROUGHPUT = 0.3        # Overall throughput 
-        W_MAX_QUEUE = 0.1         # Maximum queue length (prevent extremes)
+        # Calculate reward components with stronger scaling
+        waiting_component = waiting_time_change * WAITING_TIME_SCALE
+        queue_component = queue_length_change * QUEUE_LENGTH_SCALE
+        throughput_component = throughput_change * THROUGHPUT_SCALE
         
-        # Calculate components (negative waiting times = penalties)
-        target_waiting_component = -norm_target_waiting * W_TARGET_WAITING
-        total_waiting_component = -norm_total_waiting * W_TOTAL_WAITING
-        throughput_component = norm_throughput * W_THROUGHPUT
-        max_queue_component = -norm_max_queue * W_MAX_QUEUE
+        # Add action-specific bonus/penalty to provide clearer learning signal
+        action_bonus = 0.0
+        if new_state == 'G' and next_target_link.get('queue_length', 0) > 0:
+            # Significant bonus for turning light green when queue exists
+            action_bonus = 2.0 * min(1.0, next_target_link.get('queue_length', 0) / 5.0)
+        elif new_state == 'r' and next_target_link.get('queue_length', 0) == 0:
+            # Smaller bonus for turning light red when no queue
+            action_bonus = 1.0
+        elif new_state == 'G' and next_target_link.get('queue_length', 0) == 0:
+            # Penalty for turning light green when no queue
+            action_bonus = -0.5
         
-        # Combine components
+        # Combine components with higher weight on improvements
         total_reward = (
-            target_waiting_component +
-            total_waiting_component +
-            throughput_component +
-            max_queue_component
+            waiting_component +
+            queue_component +
+            throughput_component + 
+            action_bonus
         )
+        
+        # Track episode rewards for debugging
+        self.debug_stats['episode_rewards'].append(total_reward)
+        if len(self.debug_stats['episode_rewards']) > 100:
+            self.debug_stats['episode_rewards'].pop(0)
         
         # Return reward and components for analysis
         components = {
-            'target_waiting_component': target_waiting_component,
-            'total_waiting_component': total_waiting_component,
+            'waiting_component': waiting_component,
+            'queue_component': queue_component,
             'throughput_component': throughput_component,
-            'max_queue_component': max_queue_component
+            'action_bonus': action_bonus
         }
         
         return total_reward, components

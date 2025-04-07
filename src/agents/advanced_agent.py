@@ -287,7 +287,7 @@ class AdvancedAgent(Agent):
         "priority_beta": 0.4      # Importance sampling exponent for PER
     }
 
-    def __init__(self, tls_id, network, alpha=0.0005, gamma=0.98, epsilon=0.9,
+    def __init__(self, tls_id, network, conflict_detector, alpha=0.0005, gamma=0.98, epsilon=0.9,
                  epsilon_decay=0.9997, epsilon_min=0.2, batch_size=64,
                  memory_size=50000, target_update_freq=250, double_dqn=True,
                  prioritized_replay=True, priority_alpha=0.6, priority_beta=0.4):
@@ -298,6 +298,7 @@ class AdvancedAgent(Agent):
         """
         super().__init__(tls_id, network)
         self.network = network
+        self.conflict_detector = conflict_detector
 
         # Maximum number of links and features per link
         self.max_links = 26  # Support more links than standard DQN
@@ -322,6 +323,9 @@ class AdvancedAgent(Agent):
         self.priority_beta_increment = 0.001  # Consider making this configurable too
         self.priority_epsilon = 0.01         # Small constant to avoid zero priority
 
+        # Value to use for masking invalid actions (instead of 1e9)
+        self.masking_value = 100.0  # More moderate value to avoid numerical instability
+        
         # Experience replay memory with prioritization if enabled
         if self.prioritized_replay:
             # Prioritized replay uses a list of (experience, priority) tuples
@@ -363,6 +367,107 @@ class AdvancedAgent(Agent):
         # Create tensors for each feature type: [queue_length, waiting_time, vehicle_count, time_since_last_change]
         self.feature_means = torch.zeros(4, device=self.device)
         self.feature_variances = torch.zeros(4, device=self.device)
+
+    def _create_action_mask(self, link_states, signal_state_str, num_links=None):
+        """Creates an action mask for the given state.
+        
+        Args:
+            link_states: List of dictionaries containing link state information
+            signal_state_str: String representing the current signal state
+            num_links: Optional number of links to use (defaults to length of link_states)
+            
+        Returns:
+            Tensor with shape [num_links, len(self.link_states)] where 1 indicates valid actions
+                and 0 indicates invalid actions
+        """
+        if num_links is None:
+            num_links = len(link_states)
+            
+        # Create mask tensor (default: all actions are valid)
+        mask = torch.ones(num_links, len(self.link_states), device=self.device)
+        
+        # If no links or no signal state, return an empty mask
+        if num_links == 0 or not signal_state_str:
+            adv_logger.warning(f"Cannot create mask: No links or signal state for {self.tls_id}")
+            return mask
+            
+        # Validate and mark invalid actions
+        for internal_idx in range(min(num_links, len(link_states))):
+            # Add safety check for link structure
+            current_link_data = link_states[internal_idx]
+            if not isinstance(current_link_data, dict) or 'index' not in current_link_data:
+                adv_logger.warning(f"Invalid link state structure during masking for {self.tls_id} at index {internal_idx}. Assuming invalid.")
+                mask[internal_idx, :] = 0  # Mark all actions for this link as invalid
+                continue  # Skip to next link
+                
+            link_idx_sumo = current_link_data['index']  # Get SUMO index
+            for action_idx, new_state in enumerate(self.link_states):  # self.link_states = ['G', 'r']
+                action_tuple = (link_idx_sumo, new_state)
+                if not self._is_action_valid(action_tuple, signal_state_str):
+                    mask[internal_idx, action_idx] = 0  # Mark as invalid
+                    
+        return mask
+    
+    def _apply_mask_to_q_values(self, q_values, mask):
+        """Applies an action mask to Q-values.
+        
+        Args:
+            q_values: Tensor of Q-values [batch_size, num_links, num_actions]
+            mask: Tensor with shape [batch_size, num_links, num_actions] where 1 indicates valid actions
+            
+        Returns:
+            Masked Q-values with invalid actions set to a large negative value
+        """
+        # Ensure mask is properly broadcast to match q_values shape
+        if mask.dim() < q_values.dim():
+            if mask.dim() == 2 and q_values.dim() == 3:
+                # Add batch dimension if needed
+                mask = mask.unsqueeze(0).expand_as(q_values)
+                
+        # Clone Q-values to avoid modifying the original
+        masked_q_values = q_values.clone()
+        
+        # Apply mask - use a more moderate negative value to avoid numerical instability
+        masked_q_values = masked_q_values - (self.masking_value * (1 - mask))
+        
+        return masked_q_values
+        
+    def _is_action_valid(self, action_tuple: Tuple[int, str], current_signal_state: str) -> bool:
+        """Checks if an action conflicts with the current signal state.
+
+        Args:
+            action_tuple: Tuple of (link_index, new_state) representing the action to validate
+            current_signal_state: String representing the current signal state
+            
+        Returns:
+            True if the action is valid (doesn't create conflicts), False otherwise
+        """
+        link_idx_sumo, new_state = action_tuple
+        # Setting to 'r' is always valid from a conflict perspective
+        if new_state == 'r':
+            return True
+        # Check validity only when setting to 'G'
+        if new_state == 'G':
+            # Ensure conflict detector is available
+            if not hasattr(self, 'conflict_detector') or self.conflict_detector is None:
+                 adv_logger.error(f"Conflict detector not available in _is_action_valid for {self.tls_id}. Assuming action is invalid.")
+                 return False # Assume invalid if detector is missing
+            # Ensure current_signal_state is valid and link_idx_sumo is within bounds
+            if not isinstance(current_signal_state, str) or link_idx_sumo < 0 or link_idx_sumo >= len(current_signal_state):
+                 adv_logger.warning(f"Invalid signal state or link index ({link_idx_sumo}) in _is_action_valid for {self.tls_id}.")
+                 return False # Cannot validate
+            # Find SUMO indices of currently green links
+            currently_green_indices = {
+                i for i, char in enumerate(current_signal_state) if char in 'Gg'
+            }
+            # Get links that conflict with the target link
+            conflicting_links = self.conflict_detector.get_conflicting_links(self.tls_id, link_idx_sumo)
+            # Check if any currently green link conflicts with the target link
+            if any(g_idx in conflicting_links for g_idx in currently_green_indices):
+                # adv_logger.debug(f"Action {(link_idx_sumo, new_state)} invalid: Conflicts with green links {currently_green_indices.intersection(conflicting_links)}")
+                return False # Conflict detected!
+        # If no conflicts found for 'G', or action is not 'G', it's valid
+        return True
 
     @classmethod
     def create(cls, tls_id, network, **kwargs):
@@ -559,58 +664,42 @@ class AdvancedAgent(Agent):
 
         # Exploration: choose random action with probability epsilon
         if np.random.rand() <= exploration_rate:
-            # Advanced exploration strategy: weighted sampling based on metrics
-            weights = []
-            valid_link_indices = [] # Store original indices corresponding to weights
-            for i, link in enumerate(link_states): # Iterate original links before padding
-                queue_weight = link.get('queue_length', 0) + 0.1  # Avoid zero weight
-                waiting_weight = link.get('waiting_time', 0) / 100.0 + 0.1  # Scale waiting time
-
-                # Get historical trend from traffic history
-                link_index = link.get('index', -1)
-                if link_index == -1: continue # Skip invalid links
-
-                trend_weight = 0.1  # Default weight
-                if link_index in self.traffic_history and len(self.traffic_history[link_index]) > 1:
-                    queue_history = [record.get('queue_length', 0) for record in self.traffic_history[link_index]]
-                    if len(queue_history) >= 2:
-                        recent_trend = queue_history[-1] - queue_history[0]
-                        trend_weight = max(0.1, recent_trend / 5.0 + 0.1)
-
-                combined_weight = (queue_weight * 0.5) + (waiting_weight * 0.4) + (trend_weight * 0.1)
-                weights.append(combined_weight)
-                valid_link_indices.append(i) # Track the original index in link_states
-
-            if not weights: # No valid links found
-                adv_logger.warning(f"No valid links found during exploration for {self.tls_id}.")
-                return None
-
-            # Normalize weights to probabilities
-            total_weight = sum(weights)
-            if total_weight > 1e-6: # Use small epsilon for float comparison
-                probs = [w / total_weight for w in weights]
-                chosen_idx_in_valid = np.random.choice(len(valid_link_indices), p=probs)
-                original_link_states_idx = valid_link_indices[chosen_idx_in_valid]
-            else: # If all weights are near zero, choose uniformly from valid links
-                original_link_states_idx = np.random.choice(valid_link_indices)
-
-            # Get the actual link index and current state
-            chosen_link = link_states[original_link_states_idx]
-            link_index_to_change = chosen_link['index']
-            current_signal_state_str = state['current_signal_state']
-            if link_index_to_change >= len(current_signal_state_str):
-                 adv_logger.warning(f"Chosen link index {link_index_to_change} out of bounds for signal state '{current_signal_state_str}'.")
-                 return None # Cannot proceed
-
-            current_link_char = current_signal_state_str[link_index_to_change]
-
-            # Choose a new state different from the current one
-            if current_link_char in 'Gg':
-                new_state = 'r'  # Change green to red
+            # Exploration: choose VALID random action
+            valid_action_found = False
+            attempts = 0
+            max_attempts = 50 # Prevent infinite loops if something is wrong
+            # Need original link_states list from the input state dictionary
+            original_link_states = state.get('link_states', [])
+            num_actual_links = len(original_link_states)
+            current_signal_state_str = state.get('current_signal_state', "")
+            action = None # Initialize action to None (fallback)
+            if num_actual_links == 0 or not current_signal_state_str:
+                 adv_logger.warning(f"Cannot explore: No links or signal state for {self.tls_id}")
+                 # action remains None
             else:
-                new_state = 'G'  # Change red/yellow to green
-
-            action = (link_index_to_change, new_state)
+                while not valid_action_found and attempts < max_attempts:
+                    attempts += 1
+                    # Choose a random link index *from the actual links available*
+                    random_internal_idx = random.randrange(num_actual_links)
+                    # Get the corresponding SUMO link index, checking link structure
+                    current_link_data = original_link_states[random_internal_idx]
+                    if not isinstance(current_link_data, dict) or 'index' not in current_link_data:
+                         adv_logger.warning(f"Invalid link state structure during exploration for {self.tls_id}. Skipping attempt.")
+                         continue # Try next attempt
+                    link_idx_sumo = current_link_data['index']
+                    # Choose a random target state ('G' or 'r')
+                    new_state = random.choice(self.link_states)
+                    # Construct the action tuple using SUMO index
+                    candidate_action = (link_idx_sumo, new_state)
+                    # Check validity
+                    if self._is_action_valid(candidate_action, current_signal_state_str):
+                        action = candidate_action
+                        valid_action_found = True
+                    # else:
+                        # adv_logger.debug(f"Exploration rejected invalid action: {candidate_action}")
+                if not valid_action_found:
+                     adv_logger.warning(f"Exploration failed to find valid action after {max_attempts} attempts for {self.tls_id}. Choosing no-op (None).")
+                     action = None # Explicitly set to None if loop fails
         else:
             # Exploitation: Use the advanced DQN to select the best action
             link_tensor = torch.FloatTensor(link_features_np).unsqueeze(0).to(self.device)
@@ -622,67 +711,57 @@ class AdvancedAgent(Agent):
 
             self.model.train() # Set model back to training mode
 
-            # Use trend features to adjust link scores
-            num_actual_links = len(link_states) # Number of real links before padding
-            valid_links_to_consider = min(num_actual_links, self.max_links) # Consider scores only for actual links
+            # --- Action Masking ---
+            original_link_states = state.get('link_states', [])
+            num_actual_links = len(original_link_states)
+            # Use the signal state string obtained from preprocessing earlier
+            current_signal_state_str = signal_state_str
 
-            if valid_links_to_consider == 0:
-                adv_logger.warning(f"No valid links to consider during exploitation for {self.tls_id}.")
-                return None
+            action = None # Initialize action to None (fallback)
 
-            # Calculate priority scores that combine immediate value and trend
-            priority_scores = link_scores[0, :valid_links_to_consider].clone().cpu().numpy() # Move to CPU for numpy ops
+            if num_actual_links == 0 or not current_signal_state_str:
+                 adv_logger.warning(f"Cannot exploit: No links or signal state for {self.tls_id}")
+                 # action remains None
+            else:
+                # Create action mask using the helper method
+                action_mask = self._create_action_mask(original_link_states, current_signal_state_str, num_actual_links)
 
-            # Adjust scores based on trend features if available
-            if trend_features.numel() > 0 and trend_features.size(1) >= valid_links_to_consider:
-                trend_cpu = trend_features[0, :valid_links_to_consider].cpu().numpy()
-                for i in range(valid_links_to_consider):
-                    trend_insight = trend_cpu[i].mean() # Simple mean of trend features
-                    adjustment = trend_insight * 0.2 # Scale adjustment
-                    priority_scores[i] += adjustment
+                # Apply mask to Q-values (only for actual links)
+                # Ensure slicing is correct for potentially padded action_values
+                masked_q_values = action_values[0, :num_actual_links, :].clone() # Work on a copy [num_actual_links, num_actions]
 
-            # Get the best link index within the valid range
-            best_link_idx_in_processed = np.argmax(priority_scores) # Index relative to the 0..valid_links_to_consider range
+                # Subtract a large number from invalid actions to effectively remove them from argmax
+                masked_q_values = masked_q_values - (self.masking_value * (1 - action_mask)) # Mask is already on device
 
-            # Map back to the actual link's data
-            chosen_link_data = link_states[best_link_idx_in_processed]
-            link_index_to_change = chosen_link_data['index']
+                # Find the best valid action based on masked Q-values
+                # Find the best action across *all* valid links and *all* action types
+                try:
+                    # Check if all actions are masked
+                    if torch.all(masked_q_values < -0.9 * self.masking_value):
+                        adv_logger.warning(f"All actions masked during exploitation for {self.tls_id}. Choosing no-op (None).")
+                        action = None
+                    else:
+                        best_flat_idx = torch.argmax(masked_q_values).item()
+                        # Convert flat index back to (link_internal_idx, action_idx)
+                        best_link_idx_internal, best_action_idx = np.unravel_index(best_flat_idx, masked_q_values.shape)
 
-            # Get the best action for this chosen link (using the same index)
-            best_action_idx = action_values[0, best_link_idx_in_processed].argmax().item()
-            new_state = self.link_states[best_action_idx]
+                        # Map back to SUMO link index and state string
+                        # Add safety check for link structure again before accessing 'index'
+                        chosen_link_data = original_link_states[best_link_idx_internal]
+                        if not isinstance(chosen_link_data, dict) or 'index' not in chosen_link_data:
+                             adv_logger.error(f"Invalid link structure for chosen best link index {best_link_idx_internal}. Cannot determine action.")
+                             action = None
+                        else:
+                            link_index_to_change = chosen_link_data['index']
+                            new_state = self.link_states[best_action_idx]
+                            action = (link_index_to_change, new_state)
 
-            # Advanced policy: Avoid changing if no need (check queue/wait)
-            current_signal_state_str = state['current_signal_state']
-            if link_index_to_change >= len(current_signal_state_str):
-                 adv_logger.warning(f"Chosen link index {link_index_to_change} out of bounds during exploitation for signal state '{current_signal_state_str}'.")
-                 return None # Cannot proceed
+                except ValueError as e:
+                     # Catch potential errors if masked_q_values is empty
+                     adv_logger.error(f"Error finding best action during exploitation for {self.tls_id} (ValueError): {e}. Falling back to None.")
+                     action = None # Fallback if argmax fails
 
-            current_link_char = current_signal_state_str[link_index_to_change]
-            current_queue = chosen_link_data.get('queue_length', 0)
-            current_waiting = chosen_link_data.get('waiting_time', 0)
-
-            if ((new_state == 'G' and current_link_char in 'Gg') or \
-                (new_state == 'r' and current_link_char in 'Rr')) and \
-               current_queue < 3 and current_waiting < 100:
-
-                # Find second best if the best is trivial
-                if valid_links_to_consider > 1:
-                    priority_scores[best_link_idx_in_processed] = -np.inf # Mask the best
-                    second_best_idx_in_processed = np.argmax(priority_scores)
-
-                    # Map back to the actual link's data
-                    chosen_link_data = link_states[second_best_idx_in_processed]
-                    link_index_to_change = chosen_link_data['index']
-
-                    # Get the best action for this second-best link
-                    best_action_idx = action_values[0, second_best_idx_in_processed].argmax().item()
-                    new_state = self.link_states[best_action_idx]
-                else:
-                    # Only one link, no other choice
-                    pass # Keep original action
-
-            action = (link_index_to_change, new_state)
+            # --- End Action Masking ---
 
         # Update epsilon with adaptive decay logic (corrected logic)
         if len(self.performance_history) >= 10:
@@ -725,50 +804,50 @@ class AdvancedAgent(Agent):
             link_idx_sumo, new_state = action
 
             # --- START: Robust Positional Index Finding ---
-            link_internal_idx = -1 # Initialize as invalid (positional index 0 to max_links-1)
+            # Initialize internal index to invalid value
+            link_internal_idx = -1
+            
+            # Get the original list of link state dictionaries from the state
             original_link_states = state.get('link_states', [])
-            found_at_position = -1
-
-            # Search the *entire* original list for the SUMO index from the action
-            for i, link in enumerate(original_link_states):
-                if link.get('index') == link_idx_sumo:
-                    found_at_position = i
-                    break # Found the SUMO index at position i
-
-            # Check if found AND if its position corresponds to a feature vector we actually processed and stored
-            if found_at_position != -1 and found_at_position < self.max_links:
-                # Valid: The action corresponds to a link within our processed feature range
-                link_internal_idx = found_at_position
-            else:
-                # Invalid: Action's SUMO link index was either not found at all,
-                # or it was found at a position >= max_links, meaning its features
-                # weren't included in the link_features array stored in memory.
-                if found_at_position == -1:
-                     adv_logger.error(f"Action's SUMO link index {link_idx_sumo} not found anywhere in state's link_states list for TLS {self.tls_id}. Skipping remember.")
-                else: # found_at_position >= self.max_links
-                     adv_logger.error(f"Action's SUMO link index {link_idx_sumo} found at position {found_at_position} in state's link_states list, "
-                                      f"which is >= max_links ({self.max_links}). Features for this link were not processed/stored. Skipping remember.")
-                return # Skip storing this experience as it cannot be learned from correctly
-
+            
+            # Iterate through the original_link_states list, but only consider entries
+            # up to the self.max_links limit (because features beyond this weren't stored)
+            for i in range(min(len(original_link_states), self.max_links)):
+                # Check if this link's index matches the SUMO index from the action
+                if original_link_states[i].get('index') == link_idx_sumo:
+                    link_internal_idx = i
+                    break
+            
+            # Error Handling: Check if a valid mapping was found
+            if link_internal_idx == -1:
+                # The link_idx_sumo wasn't found in the processed links
+                adv_logger.error(f"Failed to map SUMO link index {link_idx_sumo} to internal position "
+                                 f"for TLS {self.tls_id}. Link not found or beyond max_links limit. "
+                                 f"Skipping experience storage.")
+                return  # Skip storing this experience as it cannot be learned from correctly
             # --- END: Robust Positional Index Finding ---
-
 
             # Find the index of the new state in our defined link_states list ['G', 'r']
             action_idx = self.link_states.index(new_state) if new_state in self.link_states else 0
 
             # Create experience tuple (using the validated positional index)
+            # Store the original link states in the experience for action masking during replay
+            original_next_link_states = next_state.get('link_states', [])
+
+            # Create experience tuple (using the validated positional index)
             experience = (
-                link_features,          # Numpy array [max_links, link_dim]
-                signal_state,           # String
+                link_features,              # Numpy array [max_links, link_dim]
+                signal_state,               # String
                 (link_internal_idx, action_idx), # Tuple (VALIDATED POSITIONAL idx, action type idx)
-                float(reward),          # Ensure reward is float
-                next_link_features,     # Numpy array [max_links, link_dim]
-                next_signal_state,      # String
-                bool(done)              # Ensure done is bool
+                float(reward),              # Ensure reward is float
+                next_link_features,         # Numpy array [max_links, link_dim]
+                next_signal_state,          # String
+                bool(done),                 # Ensure done is bool
+                original_link_states,       # Original link states for action masking
+                original_next_link_states   # Original next link states for action masking
             )
 
             # --- Store experience based on replay type ---
-            # (Rest of the memory storage logic remains the same)
             if self.prioritized_replay:
                 max_priority = 1.0
                 if self.memory:
@@ -867,6 +946,8 @@ class AdvancedAgent(Agent):
         next_link_features_batch = torch.FloatTensor(np.array([t[4] for t in batch])).to(self.device)
         next_signal_state_batch = [t[5] for t in batch] # List of strings
         dones_batch = torch.FloatTensor([t[6] for t in batch]).to(self.device)
+        original_link_states_batch = [t[7] for t in batch] # List of original link states
+        original_next_link_states_batch = [t[8] for t in batch] # List of original next link states
 
         # Separate link indices and action indices into tensors
         link_indices = torch.LongTensor([a[0] for a in actions_batch]).to(self.device)
@@ -892,35 +973,74 @@ class AdvancedAgent(Agent):
         current_q = torch.gather(current_q_selected_link, 1, action_indices.unsqueeze(1)).squeeze(1) # Shape: [batch_size]
 
 
-        # --- Target Q-values with Double DQN ---
+        # --- Target Q-values with Double DQN and Action Masking ---
         with torch.no_grad():
-            # 1. Get actions selected by the *online* model for the *next* state
-            next_link_scores, next_action_values_online, _ = self.model(
+            # 1. Get action values from the online model for next state
+            _, next_action_values_online, _ = self.model(
                 next_link_features_batch, next_signal_state_batch
             )
-            # Find best link based on online model's scores
-            # Need to consider only valid links if padding was used - find num actual links in next state if possible
-            # Assuming for now next_link_scores are valid for comparison across links
-            num_links_next = next_link_scores.size(1)
-            best_link_indices_online = torch.argmax(next_link_scores, dim=1) # Shape: [batch_size]
-
-            # Find best action *for that link* using online model's action values
-            best_link_indices_online_exp = best_link_indices_online.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, next_action_values_online.size(2))
-            q_values_best_link_online = torch.gather(next_action_values_online, 1, best_link_indices_online_exp.to(torch.int64)).squeeze(1) # Shape: [batch_size, num_actions]
-            best_actions_online = torch.argmax(q_values_best_link_online, dim=1) # Shape: [batch_size]
-
-            # 2. Evaluate these selected actions using the *target* model
+            
+            # Apply action masking to next-state Q-values to ensure consistency
+            batch_size = next_action_values_online.shape[0]
+            
+            # Create a list to store masked action values for each batch item
+            masked_next_action_values_online_list = []
+            
+            # Apply action masking to each item in the batch
+            for batch_idx in range(batch_size):
+                # Get original link states and signal state for this batch item
+                next_links = original_next_link_states_batch[batch_idx]
+                next_signal = next_signal_state_batch[batch_idx]
+                
+                # Create mask for this batch item
+                num_links = min(len(next_links), next_action_values_online.shape[1])
+                action_mask = self._create_action_mask(next_links, next_signal, num_links)
+                
+                # Apply mask to this batch item's Q-values
+                masked_item_q_values = self._apply_mask_to_q_values(
+                    next_action_values_online[batch_idx:batch_idx+1, :num_links, :],
+                    action_mask
+                )
+                
+                masked_next_action_values_online_list.append(masked_item_q_values.squeeze(0))
+            
+            # For each batch item, find the best valid action according to online network
+            best_next_link_indices = []
+            best_next_action_indices = []
+            
+            for batch_idx, masked_q_values in enumerate(masked_next_action_values_online_list):
+                # Skip if all actions are invalid for this item (extremely rare but possible)
+                if torch.all(masked_q_values < -0.9 * self.masking_value):
+                    # If all actions invalid, use a default action (first link, 'r' action)
+                    best_link_idx = 0
+                    best_action_idx = self.link_states.index('r')  # Usually 1 for 'r'
+                else:
+                    # Find the best valid action
+                    best_flat_idx = torch.argmax(masked_q_values).item()
+                    best_link_idx, best_action_idx = np.unravel_index(
+                        best_flat_idx, masked_q_values.shape
+                    )
+                
+                best_next_link_indices.append(best_link_idx)
+                best_next_action_indices.append(best_action_idx)
+            
+            # Convert to tensors
+            best_next_link_indices = torch.tensor(best_next_link_indices, device=self.device)
+            best_next_action_indices = torch.tensor(best_next_action_indices, device=self.device)
+            
+            # 2. Evaluate these selected actions using the target model
             _, next_action_values_target, _ = self.target_model(
                 next_link_features_batch, next_signal_state_batch
             )
-
-            # Gather Q-values from target network for the best link selected by online network
-            best_link_indices_online_exp2 = best_link_indices_online.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, next_action_values_target.size(2))
-            q_values_best_link_target = torch.gather(next_action_values_target, 1, best_link_indices_online_exp2.to(torch.int64)).squeeze(1) # Shape: [batch_size, num_actions]
-
-            # Gather the target network's Q-value for the action chosen by the online network
-            # best_actions_online shape: [batch_size] -> unsqueeze to [batch_size, 1]
-            q_target_next = torch.gather(q_values_best_link_target, 1, best_actions_online.unsqueeze(1)).squeeze(1) # Shape: [batch_size]
+            
+            # Construct indices for gathering from target network
+            # Create a batch index for gather
+            batch_indices = torch.arange(batch_size, device=self.device)
+            
+            # Gather Q-values from target network for the link and action selected by online network
+            q_target_next = next_action_values_target[
+                batch_indices, best_next_link_indices, best_next_action_indices
+            ]  # Shape: [batch_size]
 
             # Calculate final target Q value: R + gamma * Q_target_next * (1 - done)
             target_q = rewards_batch + (1 - dones_batch) * self.gamma * q_target_next
@@ -956,52 +1076,46 @@ class AdvancedAgent(Agent):
             adv_logger.info(f"Updating target network at step {self.train_step}")
             self.target_model.load_state_dict(self.model.state_dict())
 
-    # --- SIMPLIFIED REWARD FUNCTION ---
-    def calculate_reward(self, state, action, next_state):
+    def calculate_reward(self, state: Dict[str, Any], action: Optional[Tuple[int, str]],
+                         next_state: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
         """
-        Calculate reward based on the total waiting time across all lanes.
-        This simplified reward function uses the negative sum of waiting times,
-        scaled to a reasonable range for stable learning.
-
+        Calculate reward based on minimizing traffic pressure.
+        Pressure is approximated by the sum of queue lengths on incoming lanes.
         Args:
-            state: Previous state dictionary.
-            action: Action taken tuple (link_index, new_state).
+            state: Previous state dictionary (unused in this version).
+            action: Action taken tuple (unused in this version).
             next_state: Resulting state dictionary.
-
         Returns:
-            Tuple[float, Dict[str, float]]: Calculated reward and its components.
+            Tuple[float, Dict[str, float]]: Calculated reward (-pressure) and components.
         """
         # --- Input Validation ---
-        if action is None or not isinstance(next_state, dict):
+        if not isinstance(next_state, dict):
+            # Use logger associated with the instance if available, otherwise default
             logger_instance = getattr(self, 'adv_logger', logging.getLogger(__name__))
-            logger_instance.warning(f"Missing state/action for reward calc (TLS: {self.tls_id})")
+            logger_instance.warning(f"Invalid next_state for reward calc (TLS: {self.tls_id})")
             return 0.0, {}
-
         # Get link states from next_state
         link_states = next_state.get('link_states', [])
         if not link_states:
-            return 0.0, {}
-
-        # Calculate total waiting time (sum of all link waiting times)
-        total_waiting_time = sum(link.get('waiting_time', 0.0) for link in link_states)
-
-        # Scale the reward to a reasonable range
-        # Typical waiting times can be in hundreds to thousands of seconds
-        # We aim for rewards roughly in the range [-10, 0]
-        SCALE_FACTOR = 500.0  # Adjust based on typical waiting times in the network
-
-        # Calculate reward (negative waiting time)
-        reward = -total_waiting_time / SCALE_FACTOR
-
+            # No links, pressure is effectively zero
+            return 0.0, {'total_queue_length': 0.0, 'pressure': 0.0, 'reward': 0.0}
+        # Calculate pressure = sum of queue lengths on all controlled links
+        total_queue_length = sum(link.get('queue_length', 0.0) for link in link_states)
+        pressure = total_queue_length # Using queue length as pressure proxy
+        # Scale the reward (negative pressure)
+        # Aim for rewards roughly in [-10, 0]. Max queue sum might be ~100-200?
+        PRESSURE_SCALE_FACTOR = 20.0 # Adjust based on observed queue sums
+        # Reward is negative pressure (we want to minimize pressure)
+        reward = -pressure / PRESSURE_SCALE_FACTOR
+        # Ensure reward is not excessively large/small
+        reward = max(-10.0, min(reward, 0.0)) # Clip reward
         # Return reward and components for analysis
         components = {
-            'total_waiting_time': total_waiting_time,
-            'raw_reward': -total_waiting_time,
-            'scaled_reward': reward
+            'total_queue_length': total_queue_length,
+            'pressure': pressure,
+            'reward': reward
         }
-
         return reward, components
-    # --- END SIMPLIFIED REWARD FUNCTION ---
 
     # --- save_state and load_state methods ---
     def save_state(self, directory_path: str):
