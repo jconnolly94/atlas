@@ -6,8 +6,11 @@ import random
 import os
 import json
 import logging
-from collections import deque, defaultdict
+from collections import deque
 from typing import Dict, Any, Tuple, Optional, List, Union
+import traci
+
+import torch.nn.functional as F
 
 from .agent import Agent
 
@@ -15,858 +18,446 @@ from .agent import Agent
 dqn_logger = logging.getLogger(__name__) # Use __name__ for module-level logger
 
 
-class DQNLinkEncoder(nn.Module):
-    """Encoder for link-level state representation."""
-    
-    def __init__(self, input_dim=5, embedding_dim=8):
-        """Initialize link encoder.
-        
-        Args:
-            input_dim: Dimensionality of each link state vector
-            embedding_dim: Dimensionality of output embeddings
+# --- Simplified DQN Network (Phase-Based) ---
+class PhaseDQN(nn.Module):
+    """A simple MLP DQN that predicts Q-values for each phase."""
+    def __init__(self, input_dim: int, num_phases: int):
         """
-        super(DQNLinkEncoder, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 16),
+        Args:
+            input_dim: Size of the flattened state vector.
+            num_phases: Number of possible phases (actions).
+        """
+        super(PhaseDQN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 128), # Increased layer size
             nn.ReLU(),
-            nn.Linear(16, embedding_dim),
-            nn.ReLU()
-        )
-        
-    def forward(self, x):
-        """Encode link state vectors.
-        
-        Args:
-            x: Tensor of shape [batch_size, num_links, input_dim]
-            
-        Returns:
-            Tensor of shape [batch_size, num_links, embedding_dim]
-        """
-        # Process each link independently
-        batch_size, num_links, input_dim = x.shape
-        x = x.view(-1, input_dim)  # Reshape to [batch_size * num_links, input_dim]
-        x = self.encoder(x)
-        return x.view(batch_size, num_links, -1)  # Reshape back to [batch_size, num_links, embedding_dim]
-
-
-class DQNSignalStateEncoder(nn.Module):
-    """Encoder for the current signal state."""
-    
-    def __init__(self, embedding_dim=8):
-        """Initialize signal state encoder.
-        
-        Args:
-            embedding_dim: Dimensionality of output embeddings
-        """
-        super(DQNSignalStateEncoder, self).__init__()
-        # Character-level embedding for signal state (r, R, g, G, y, Y, o, O)
-        self.char_embedding = nn.Embedding(8, embedding_dim)
-        
-        # Mapping from signal state characters to indices
-        self.char_to_idx = {
-            'r': 0, 'R': 1, 'g': 2, 'G': 3, 
-            'y': 4, 'Y': 5, 'o': 6, 'O': 7
-        }
-    
-    def _state_to_indices(self, state_str):
-        """Convert signal state string to tensor of indices.
-        
-        Args:
-            state_str: Signal state string (e.g., "GrGr")
-            
-        Returns:
-            Tensor of indices
-        """
-        indices = []
-        for c in state_str:
-            if c in self.char_to_idx:
-                indices.append(self.char_to_idx[c])
-            else:
-                # Default to 'r' for unknown characters
-                indices.append(0)
-        return torch.tensor(indices, dtype=torch.long)
-    
-    def forward(self, state_strs):
-        """Encode signal state strings.
-        
-        Args:
-            state_strs: List of signal state strings
-            
-        Returns:
-            Tensor of embeddings for each position in the state strings
-        """
-        # Process batch of state strings
-        batch_embeddings = []
-        for state_str in state_strs:
-            indices = self._state_to_indices(state_str)
-            embeddings = self.char_embedding(indices)
-            batch_embeddings.append(embeddings)
-        
-        # Stack into a batch
-        return torch.stack(batch_embeddings)
-
-
-class TrafficNetworkDQN(nn.Module):
-    """Deep Q-Network for traffic signal control with a simplified architecture."""
-
-    def __init__(self, max_links=16, link_dim=5, output_dim=2):
-        """Initialize simplified network architecture.
-
-        Args:
-            max_links: Maximum number of links to support
-            link_dim: Dimensionality of each link's feature vector
-            output_dim: Output dimension for each link (green or red)
-        """
-        super(TrafficNetworkDQN, self).__init__()
-        
-        # Simplified architecture with larger embedding dimension
-        self.link_embedding_dim = 16
-        self.signal_embedding_dim = 8
-        self.max_links = max_links
-        
-        # Use the existing encoders but with larger dimensions for link embedding
-        self.link_encoder = DQNLinkEncoder(link_dim, self.link_embedding_dim)
-        self.signal_encoder = DQNSignalStateEncoder(self.signal_embedding_dim)
-        
-        # Simplified link selection network with fewer layers but more units
-        self.link_selector = nn.Sequential(
-            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 64),
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(64, 1)  # Scores for each link
+            nn.Linear(128, num_phases) # Output Q-value for each phase
         )
-        
-        # Simplified action selection network
-        self.action_selector = nn.Sequential(
-            nn.Linear(self.link_embedding_dim + self.signal_embedding_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, output_dim)  # Q-values for each possible state (G, r)
-        )
+        dqn_logger.info(f"PhaseDQN initialized with input_dim={input_dim}, num_phases={num_phases}")
 
-    def forward(self, link_features, signal_state):
-        """Forward pass through the network with improved robustness.
-
-        Args:
-            link_features: Tensor of link features [batch_size, num_links, link_dim]
-            signal_state: List of signal state strings (e.g., ["GrGr", "rGrG"])
-
-        Returns:
-            link_scores: Scores for selecting each link [batch_size, num_links]
-            action_values: Q-values for actions on each link [batch_size, num_links, output_dim]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        batch_size = link_features.shape[0]
-        num_links = link_features.shape[1]
-        
-        # Ensure we have at least one sample to process
-        if batch_size == 0 or num_links == 0:
-            # Return empty tensors of appropriate shapes if no data
-            return (torch.zeros(0, num_links), 
-                    torch.zeros(0, num_links, 2))  # 2 for G and r
-        
-        # Encode link features
-        link_embeddings = self.link_encoder(link_features)  # [batch_size, num_links, link_embedding_dim]
-        
-        try:
-            # Encode signal states 
-            signal_embeddings = self.signal_encoder(signal_state)  # [batch_size, max_signal_len, signal_embedding_dim]
-            
-            # Check signal embeddings shape for safety
-            if signal_embeddings.dim() < 3:
-                # Handle unexpected dimensions by creating a properly sized tensor of zeros
-                signal_embeddings = torch.zeros(
-                    batch_size, 
-                    min(num_links, len(signal_state[0]) if signal_state and signal_state[0] else 0), 
-                    self.signal_embedding_dim
-                )
-        except Exception as e:
-            # Handle any unexpected errors during signal encoding
-            print(f"Warning: Error encoding signal states: {e}")
-            # Create a default tensor of zeros
-            signal_embeddings = torch.zeros(batch_size, num_links, self.signal_embedding_dim)
-        
-        # Concatenate link embeddings with corresponding signal state embeddings
-        combined_features = []
-        for b in range(batch_size):
-            # For each link, concatenate its embedding with the corresponding signal state embedding
-            for l in range(num_links):
-                # Make sure we don't exceed signal embedding dimensions
-                if signal_embeddings.size(0) > b and signal_embeddings.size(1) > l:
-                    combined = torch.cat([
-                        link_embeddings[b, l],
-                        signal_embeddings[b, l]
-                    ])
-                else:
-                    # Pad with zeros if signal embedding is not available
-                    signal_padding = torch.zeros(self.signal_embedding_dim)
-                    combined = torch.cat([link_embeddings[b, l], signal_padding])
-                combined_features.append(combined)
-        
-        # Reshape for processing
-        combined_features = torch.stack(combined_features).view(
-            batch_size, num_links, self.link_embedding_dim + self.signal_embedding_dim
-        )
-        
-        # Get link selection scores
-        link_scores = self.link_selector(combined_features).squeeze(-1)  # [batch_size, num_links]
-        
-        # Get action values for each link
-        action_values = self.action_selector(combined_features)  # [batch_size, num_links, output_dim]
-        
-        return link_scores, action_values
+        Args:
+            x: Flattened state tensor, shape [batch_size, input_dim].
+        Returns:
+            q_values: Tensor of Q-values for each phase, shape [batch_size, num_phases].
+        """
+        return self.network(x)
 
-
+# --- DQNAgent Modified for Phase Control ---
 class DQNAgent(Agent):
-    """Agent using Deep Q-Learning for traffic signal control."""
-    
-    # Default configuration - adjusted for better learning
+    """Agent using Deep Q-Learning for traffic signal control (Phase-Based Actions)."""
+
     DEFAULT_CONFIG = {
-        "alpha": 0.005,           # Higher learning rate for faster adaptation
-        "gamma": 0.95,            # Same discount factor
-        "epsilon": 1.0,           # Start with full exploration 
-        "epsilon_decay": 0.995,   # Faster epsilon decay to start exploiting learned policy sooner
-        "epsilon_min": 0.05,      # Lower minimum to favor exploitation in later stages
-        "batch_size": 64,         # Larger batch size for more stable gradient estimates
-        "memory_size": 10000,     # Smaller but adequate memory for faster convergence
-        "target_update_freq": 50  # More frequent target updates for faster learning
+        "alpha": 0.001,           # Learning rate (adjust as needed)
+        "gamma": 0.95,            # Discount factor
+        "epsilon": 1.0,           # Start with full exploration
+        "epsilon_decay": 0.999,   # Slower decay
+        "epsilon_min": 0.05,      # Lower minimum exploitation
+        "batch_size": 64,
+        "memory_size": 20000,     # Increased memory size
+        "target_update_freq": 100 # Update target network more often
     }
 
-    def __init__(self, tls_id, network, alpha=0.001, gamma=0.95, epsilon=0.9,
-                 epsilon_decay=0.9999, epsilon_min=0.2, batch_size=32,
-                 memory_size=20000, target_update_freq=200):
-        """Initialize DQNAgent.
-
-        Args:
-            tls_id: ID of the traffic light this agent controls
-            network: Network object providing access to simulation data
-            alpha: Learning rate
-            gamma: Discount factor
-            epsilon: Exploration rate
-            epsilon_decay: Rate at which epsilon decreases
-            epsilon_min: Minimum exploration rate
-            batch_size: Batch size for learning
-            memory_size: Size of experience replay memory
-            target_update_freq: Frequency of target network updates
-        """
+    def __init__(self, tls_id, network, alpha=0.001, gamma=0.95, epsilon=1.0,
+                 epsilon_decay=0.999, epsilon_min=0.05, batch_size=64,
+                 memory_size=20000, target_update_freq=100):
+        """Initialize DQNAgent for phase control."""
         super().__init__(tls_id, network)
-        self.network = network
+        self.network = network # Keep network reference
 
-        # Maximum number of links and features per link
-        self.max_links = 16  # Maximum number of links to support
-        self.link_dim = 5    # Features per link: [queue_length, waiting_time, etc.]
-        
-        # Possible link states (G for green, r for red)
-        self.link_states = ['G', 'r']  # Simplified to just green and red
-        
-        # DQN hyperparameters
+        # DQN hyperparameters from config
+        self.alpha = alpha
         self.gamma = gamma
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
         self.epsilon_min = epsilon_min
         self.batch_size = batch_size
+        self.memory_size = memory_size
+        self.target_update_freq = target_update_freq
+
+        # --- Action Space: Phases ---
+        try:
+            # Get phase definitions from SUMO logic for this TLS
+            logics = traci.trafficlight.getAllProgramLogics(self.tls_id)
+            if not logics:
+                raise ValueError(f"No program logics found for TLS '{self.tls_id}'")
+            # Assuming the first logic is the relevant one
+            self.phases = logics[0].phases
+            self.num_phases = len(self.phases)
+            self.action_size = self.num_phases # Action is selecting a phase index
+            dqn_logger.info(f"TLS {self.tls_id} initialized with {self.num_phases} phases.")
+        except Exception as e:
+             dqn_logger.error(f"Failed to get phases for TLS {self.tls_id}: {e}. Setting num_phases to 4 as fallback.")
+             # Fallback if TraCI fails or no logic defined
+             self.num_phases = 4 # Common fallback
+             self.action_size = 4
+             self.phases = None # Indicate phases couldn't be loaded
+
+        # --- State Representation ---
+        # Simplified state: Features derived from links, plus current phase info
+        # Example features: max_queue, total_queue, avg_wait, time_on_current_phase, current_phase_one_hot
+        self.link_feature_dim = 4 # queue, wait, count, time_since_change
+        self.max_links = 16 # Max links to consider (adjust based on networks)
+        # Flattened link features + one-hot encoded phase
+        self.state_dim = (self.max_links * self.link_feature_dim) + self.num_phases
+        dqn_logger.info(f"State dimension set to {self.state_dim}")
 
         # Experience replay memory
-        self.memory = deque(maxlen=memory_size)
+        self.memory = deque(maxlen=self.memory_size)
 
-        # Create main and target networks
-        self.model = TrafficNetworkDQN(self.max_links, self.link_dim, len(self.link_states))
-        self.target_model = TrafficNetworkDQN(self.max_links, self.link_dim, len(self.link_states))
+        # Device setup
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dqn_logger.info(f"DQNAgent {self.tls_id} using device: {self.device}")
 
-        # Copy weights from main to target network
+        # Create main and target networks (using PhaseDQN)
+        self.model = PhaseDQN(self.state_dim, self.action_size).to(self.device)
+        self.target_model = PhaseDQN(self.state_dim, self.action_size).to(self.device)
         self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.eval()
 
         # Optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=alpha)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.alpha)
 
-        # Target network update frequency
-        self.target_update_freq = target_update_freq
+        # Tracking
         self.train_step = 0
+        self.last_action = None # Stores the chosen phase index
+        self.current_phase_start_time = 0.0 # Track time for state feature
 
-        # Track last action for reward calculation
-        self.last_action = None
-        
-        # For improvement-based reward calculation
-        self._prev_throughput = 0
-        
-        # Debugging metrics
-        self.debug_stats = {
-            'avg_reward': 0,
-            'avg_loss': 0,
-            'avg_q_value': 0,
-            'exploration_rate': self.epsilon,
-            'episode_rewards': []
-        }
-        self.debug_count = 0
-        self.debug_interval = 100  # Log debug info every 100 steps
-        
     @classmethod
     def create(cls, tls_id, network, **kwargs):
-        """Create an instance of the DQNAgent with proper configuration.
-        
-        Args:
-            tls_id: ID of the traffic light this agent controls
-            network: Network object providing access to simulation data
-            **kwargs: Additional configuration parameters
-            
-        Returns:
-            Properly configured DQNAgent instance
-        """
-        # Start with default configuration
+        """Factory method for DQNAgent."""
         config = cls.DEFAULT_CONFIG.copy()
-        
-        # Override with provided kwargs
         config.update(kwargs)
-        
-        # Create and return instance
         return cls(tls_id, network, **config)
 
-    def _preprocess_state(self, state):
-        """Convert environment state dict to tensors for the neural network.
-        
-        Args:
-            state: State dictionary from environment
-            
-        Returns:
-            Tuple of (link_features, signal_state)
-        """
-        # Extract link states and current signal state
-        link_states = state['link_states']
-        current_signal_state = state['current_signal_state']
-        
-        # Convert link states to a tensor
-        # Features: [queue_length, waiting_time, vehicle_count, time_since_last_change, is_green]
+    def _preprocess_state(self, state: Dict[str, Any]) -> Optional[np.ndarray]:
+        """Convert environment state dict to a flattened numpy array for the network."""
+        if not isinstance(state, dict) or 'link_states' not in state or 'current_signal_state' not in state:
+            dqn_logger.warning(f"Invalid state format received for {self.tls_id}")
+            return None
+
+        link_states = state.get('link_states', [])
+        # current_signal_state = state.get('current_signal_state', "") # Not directly used now
+        current_time = self.network.get_current_time() # Get current time from network
+
+        # --- Calculate Current Phase ---
+        # We need to know the current phase index to create the one-hot encoding
+        # and calculate time_on_phase. This might require querying SUMO again.
+        try:
+            current_phase_index = traci.trafficlight.getPhase(self.tls_id)
+        except Exception as e:
+             dqn_logger.warning(f"Could not get current phase index for {self.tls_id}: {e}. Defaulting to 0.")
+             current_phase_index = 0 # Fallback
+
+        # Check if phase changed to reset timer
+        if self.last_action != current_phase_index:
+             self.current_phase_start_time = current_time
+
+        time_on_phase = current_time - self.current_phase_start_time
+
+        # --- Extract Link Features ---
         link_features = []
         for link in link_states:
-            # Check if current state is green (G or g)
-            is_green = 1.0 if current_signal_state[link['index']] in 'Gg' else 0.0
-            
+            # Basic normalization (consider improving this)
             features = [
-                link['queue_length'] / 20.0,  # Normalize queue length
-                link['waiting_time'] / 500.0,  # Normalize waiting time
-                link['vehicle_count'] / 20.0,  # Normalize vehicle count
-                link['time_since_last_change'] / 120.0,  # Normalize time since last change
-                is_green
+                link.get('queue_length', 0.0) / 20.0,
+                link.get('waiting_time', 0.0) / 300.0,
+                link.get('vehicle_count', 0.0) / 30.0,
+                link.get('time_since_last_change', 0.0) / 120.0
             ]
             link_features.append(features)
-            
-        # Pad to max_links if necessary
-        while len(link_features) < self.max_links:
-            link_features.append([0.0, 0.0, 0.0, 0.0, 0.0])
-            
-        # Truncate if too many links
-        link_features = link_features[:self.max_links]
-        
-        return np.array(link_features), current_signal_state
 
-    def choose_action(self, state):
-        """Choose an action based on the current state.
-        
-        Args:
-            state: Current state dictionary with link_states and current_signal_state
-            
-        Returns:
-            Tuple of (link_index, new_state) or None if no action
-        """
-        # Handle invalid state format
-        if not isinstance(state, dict) or 'link_states' not in state:
-            print(f"Warning: DQN agent received incompatible state format. Expected dict with 'link_states' key.")
-            return None
-            
-        # Get link states and validate
-        link_states = state['link_states']
-        if not link_states:
-            return None  # No links to control
-            
-        # Preprocess state for neural network
-        link_features, signal_state = self._preprocess_state(state)
-        
-        # Exploration: choose random action with probability epsilon
-        if np.random.rand() <= self.epsilon:
-            # Choose a random link with higher probability for links with queues
-            queue_lengths = np.array([link['queue_length'] for link in link_states])
-            if queue_lengths.sum() > 0:
-                probs = queue_lengths / queue_lengths.sum()
-                link_idx = np.random.choice(len(link_states), p=probs)
-            else:
-                link_idx = np.random.choice(len(link_states))
-                
-            # Get the current state of this link
-            link_index = link_states[link_idx]['index']
-            current_link_state = state['current_signal_state'][link_index]
-            
-            # Choose a new state different from the current one
-            if current_link_state in 'Gg':
-                new_state = 'r'  # Change green to red
-            else:
-                new_state = 'G'  # Change red/yellow to green
-                
-            action = (link_index, new_state)
+        # Pad or truncate link features
+        num_actual_links = len(link_features)
+        if num_actual_links < self.max_links:
+            padding = [[0.0] * self.link_feature_dim] * (self.max_links - num_actual_links)
+            link_features.extend(padding)
+        elif num_actual_links > self.max_links:
+            link_features = link_features[:self.max_links]
+
+        # Flatten link features
+        flat_link_features = np.array(link_features).flatten()
+
+        # --- Create Phase One-Hot Encoding ---
+        phase_one_hot = np.zeros(self.num_phases)
+        if 0 <= current_phase_index < self.num_phases:
+             phase_one_hot[current_phase_index] = 1.0
         else:
-            # Exploitation: Use the DQN to select the best action
-            
-            # Convert to torch tensor and add batch dimension
-            link_tensor = torch.FloatTensor(link_features).unsqueeze(0)
-            
+            dqn_logger.warning(f"Current phase index {current_phase_index} out of bounds for one-hot encoding (num_phases={self.num_phases}).")
+            # Handle out-of-bounds index, e.g., set the first element or leave as zeros
+            if self.num_phases > 0: phase_one_hot[0] = 1.0 # Default to phase 0
+
+        # --- Combine Features ---
+        # Add normalized time_on_phase to the state
+        norm_time_on_phase = time_on_phase / 60.0 # Normalize by estimated max phase time
+
+        # Final state vector
+        state_vector = np.concatenate((
+            flat_link_features,
+            phase_one_hot
+            # Potentially add norm_time_on_phase here if desired
+            # np.array([norm_time_on_phase])
+        )).astype(np.float32)
+
+        # Ensure state_vector dimension matches self.state_dim (adjust self.state_dim if needed)
+        if len(state_vector) != self.state_dim:
+             dqn_logger.error(f"State vector length mismatch! Expected {self.state_dim}, Got {len(state_vector)}. Check feature calculation.")
+             # Fallback: return None or a zero vector of correct size
+             return np.zeros(self.state_dim, dtype=np.float32) # Return zeros to avoid crashing downstream
+
+        return state_vector
+
+    def choose_action(self, state: Dict[str, Any]) -> Optional[int]:
+        """Choose a phase index based on the current state."""
+        processed_state = self._preprocess_state(state)
+
+        if processed_state is None:
+            return None # Cannot choose action
+
+        action_index = None
+        # Exploration vs Exploitation
+        if np.random.rand() <= self.epsilon:
+            # --- Explore: Choose a random phase index ---
+            action_index = random.randrange(self.action_size)
+        else:
+            # --- Exploit: Choose the best phase based on Q-values ---
+            state_tensor = torch.FloatTensor(processed_state).unsqueeze(0).to(self.device)
+            self.model.eval() # Evaluation mode
             with torch.no_grad():
-                # Get link scores and action values
-                link_scores, action_values = self.model(link_tensor, [signal_state])
-                
-                # Get the best link to change
-                valid_links = min(len(link_states), self.max_links)
-                best_link_idx = link_scores[0, :valid_links].argmax().item()
-                
-                # Get the best action for this link
-                best_action_idx = action_values[0, best_link_idx].argmax().item()
-                
-                # Map to actual link index and state
-                link_index = link_states[best_link_idx]['index']
-                new_state = self.link_states[best_action_idx]
-                
-                # Don't change if the link is already in the desired state
-                current_link_state = state['current_signal_state'][link_index]
-                if (new_state == 'G' and current_link_state in 'Gg') or \
-                   (new_state == 'r' and current_link_state in 'Rr'):
-                    # Find the second-best link
-                    temp_scores = link_scores.clone()
-                    temp_scores[0, best_link_idx] = float('-inf')
-                    second_best_link_idx = temp_scores[0, :valid_links].argmax().item()
-                    
-                    # Get the best action for this link
-                    second_best_action_idx = action_values[0, second_best_link_idx].argmax().item()
-                    
-                    # Map to actual link index and state
-                    link_index = link_states[second_best_link_idx]['index']
-                    new_state = self.link_states[second_best_action_idx]
-                
-            action = (link_index, new_state)
-        
-        # Update epsilon
+                q_values = self.model(state_tensor) # Shape: [1, num_phases]
+            self.model.train() # Training mode
+
+            # --- Action Masking (Optional but Recommended) ---
+            # Check if the selected action corresponds to the current phase.
+            # Sometimes staying in the current phase is needed (green extension).
+            # No inherent conflict check needed when selecting phases, SUMO handles it.
+            # However, you *could* mask actions that would violate min_green times if you track them.
+            # For now, we allow selecting any phase.
+            action_index = torch.argmax(q_values).item()
+
+        # Decay epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        
-        # Store last action for learning
-        self.last_action = action
-        return action
-        
+        self.last_action = action_index # Store chosen phase index
+
+        return action_index # Return the phase index
+
+    def remember(self, state_dict, action_index, reward, next_state_dict, done):
+        """Store experience in replay memory."""
+        if action_index is None: return # Can't store if no action taken
+
+        state_vector = self._preprocess_state(state_dict)
+        next_state_vector = self._preprocess_state(next_state_dict)
+
+        if state_vector is None or next_state_vector is None:
+            # dqn_logger.debug("Skipping remember due to invalid state preprocessing.")
+            return # Don't store incomplete transitions
+
+        # Store: state_vector, action_index, reward, next_state_vector, done
+        experience = (state_vector, action_index, reward, next_state_vector, done)
+        self.memory.append(experience)
+
+    def learn(self, state: Dict[str, Any], action_index: Optional[int], next_state: Dict[str, Any], done: bool):
+        """Learn from experience using DQN."""
+        if action_index is None: return # Can't learn without an action
+
+        # Calculate reward (using the base class method for now)
+        # The base reward function might need the original action tuple format.
+        # Let's adapt or use a simplified reward for phase control.
+        reward, _ = self.calculate_reward_phase_based(state, action_index, next_state)
+
+        # Store experience
+        self.remember(state, action_index, reward, next_state, done)
+
+        # Perform experience replay if memory is sufficient
+        if len(self.memory) >= self.batch_size:
+            self._replay()
+
+    def _replay(self):
+        """Perform experience replay."""
+        minibatch = random.sample(self.memory, self.batch_size)
+
+        # Unpack batch data
+        state_vectors = torch.FloatTensor(np.array([t[0] for t in minibatch])).to(self.device)
+        action_indices = torch.LongTensor([t[1] for t in minibatch]).unsqueeze(1).to(self.device) # Shape: [batch, 1]
+        rewards = torch.FloatTensor([t[2] for t in minibatch]).to(self.device)
+        next_state_vectors = torch.FloatTensor(np.array([t[3] for t in minibatch])).to(self.device)
+        dones = torch.FloatTensor([t[4] for t in minibatch]).to(self.device)
+
+        # --- Q-value Calculation ---
+        # 1. Get Q-values for actions taken in the original states
+        # model output shape: [batch, num_phases]
+        current_q_all = self.model(state_vectors)
+        # Gather Q-values for the specific action indices
+        current_q = torch.gather(current_q_all, 1, action_indices).squeeze(1) # Shape: [batch]
+
+        # 2. Calculate target Q-values using Double DQN
+        with torch.no_grad():
+            # Select best actions for next states using the online model
+            next_q_all_online = self.model(next_state_vectors) # Shape: [batch, num_phases]
+            best_next_actions = torch.argmax(next_q_all_online, dim=1).unsqueeze(1) # Shape: [batch, 1]
+
+            # Evaluate these actions using the target model
+            next_q_all_target = self.target_model(next_state_vectors) # Shape: [batch, num_phases]
+            next_q_target = torch.gather(next_q_all_target, 1, best_next_actions).squeeze(1) # Shape: [batch]
+
+            # Calculate final target Q value
+            target_q = rewards + self.gamma * next_q_target * (1 - dones)
+
+        # 3. Calculate loss
+        loss = F.mse_loss(current_q, target_q)
+
+        # 4. Optimize the model
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0) # Clip gradients
+        self.optimizer.step()
+
+        # Update target network periodically
+        self.train_step += 1
+        if self.train_step % self.target_update_freq == 0:
+            self.target_model.load_state_dict(self.model.state_dict())
+
+    def calculate_reward_phase_based(self, state, action_index, next_state):
+        """Calculate reward based on state changes for phase-based control."""
+        if not isinstance(state, dict) or 'link_states' not in state or \
+           not isinstance(next_state, dict) or 'link_states' not in next_state:
+            return 0.0, {}
+
+        prev_link_states = state.get('link_states', [])
+        next_link_states = next_state.get('link_states', [])
+
+        if not prev_link_states or not next_link_states:
+            return 0.0, {}
+
+        # Simple reward: Negative change in total waiting time
+        prev_total_wait = sum(link.get('waiting_time', 0) for link in prev_link_states)
+        next_total_wait = sum(link.get('waiting_time', 0) for link in next_link_states)
+
+        # Reward is the reduction in waiting time
+        reward = (prev_total_wait - next_total_wait) / 10.0 # Scale down reward
+
+        # Small penalty for very long queues to discourage gridlock
+        max_queue = 0
+        for link in next_link_states:
+            max_queue = max(max_queue, link.get('queue_length', 0))
+
+        queue_penalty = 0
+        if max_queue > 30: # Penalize if any queue gets very long
+            queue_penalty = - (max_queue - 30) * 0.05
+
+        total_reward = reward + queue_penalty
+
+        components = {
+            'wait_time_reduction': reward,
+            'queue_penalty': queue_penalty
+        }
+
+        return total_reward, components
+
+    # --- save_state and load_state (Keep the existing ones, they should work) ---
     def save_state(self, directory_path: str):
-        """Saves the DQN agent's state (models, optimizer, hyperparameters) to the specified directory."""
+        """Saves the DQN agent's state."""
+        # (Existing save_state logic - check it matches attribute names like self.num_phases)
         try:
-            # Ensure directory exists using the base class method if available, else create manually
             if hasattr(super(), 'save_state') and callable(super().save_state):
                  super().save_state(directory_path)
             else:
                  os.makedirs(directory_path, exist_ok=True)
-            dqn_logger.info(f"Ensured directory exists: {directory_path}")
         except Exception as e:
             dqn_logger.error(f"Error ensuring directory exists {directory_path}: {e}", exc_info=True)
-            return # Cannot proceed if directory cannot be created/accessed
+            return
 
         model_path = os.path.join(directory_path, 'model.pth')
         target_model_path = os.path.join(directory_path, 'target_model.pth')
         optimizer_path = os.path.join(directory_path, 'optimizer.pth')
         hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
-        dqn_logger.info(f"Attempting to save DQNAgent state for {self.tls_id} to {directory_path}")
+        dqn_logger.info(f"Attempting to save Phase DQNAgent state for {self.tls_id} to {directory_path}")
 
         try:
-            # Save state dictionaries
-            if hasattr(self, 'model') and self.model:
-                torch.save(self.model.state_dict(), model_path)
-            else:
-                 dqn_logger.warning("Attribute 'model' not found or is None. Skipping save.")
+            torch.save(self.model.state_dict(), model_path)
+            torch.save(self.target_model.state_dict(), target_model_path)
+            torch.save(self.optimizer.state_dict(), optimizer_path)
 
-            if hasattr(self, 'target_model') and self.target_model:
-                torch.save(self.target_model.state_dict(), target_model_path)
-            else:
-                dqn_logger.warning("Attribute 'target_model' not found or is None. Skipping save.")
-
-            if hasattr(self, 'optimizer') and self.optimizer:
-                torch.save(self.optimizer.state_dict(), optimizer_path)
-            else:
-                dqn_logger.warning("Attribute 'optimizer' not found or is None. Skipping save.")
-
-            # Save hyperparameters
             hyperparams = {
-                'epsilon': getattr(self, 'epsilon', None),
-                'gamma': getattr(self, 'gamma', None),
-                'train_step': getattr(self, 'train_step', 0),
-                'epsilon_decay': getattr(self, 'epsilon_decay', None),
-                'epsilon_min': getattr(self, 'epsilon_min', None),
-                'batch_size': getattr(self, 'batch_size', None),
-                'memory_size': getattr(self, 'memory', None).maxlen if hasattr(self, 'memory') and hasattr(self.memory, 'maxlen') else None, # Save intended size
-                'target_update_freq': getattr(self, 'target_update_freq', None),
-                # Add other hyperparameters defined in __init__ or config
+                'epsilon': self.epsilon,
+                'gamma': self.gamma,
+                'alpha': self.alpha, # Save actual learning rate used
+                'train_step': self.train_step,
+                'epsilon_decay': self.epsilon_decay,
+                'epsilon_min': self.epsilon_min,
+                'batch_size': self.batch_size,
+                'memory_size': self.memory_size,
+                'target_update_freq': self.target_update_freq,
+                'state_dim': self.state_dim, # Save state dim used by network
+                'action_size': self.action_size, # Save action size (num_phases)
+                'num_phases': self.num_phases,
+                'max_links': self.max_links,
+                'link_feature_dim': self.link_feature_dim
             }
             with open(hyperparams_path, 'w') as f:
                 json.dump(hyperparams, f, indent=4)
 
-            dqn_logger.info(f"DQNAgent state for {self.tls_id} saved successfully to {directory_path}")
+            dqn_logger.info(f"Phase DQNAgent state for {self.tls_id} saved successfully.")
 
         except Exception as e:
-            dqn_logger.error(f"Error saving DQNAgent state for {self.tls_id} to {directory_path}: {e}", exc_info=True)
-            
+            dqn_logger.error(f"Error saving Phase DQNAgent state for {self.tls_id}: {e}", exc_info=True)
+
     def load_state(self, directory_path: str):
-        """Loads the DQN agent's state (models, optimizer, hyperparameters) from the specified directory."""
+        """Loads the DQN agent's state."""
+        # (Existing load_state logic - check it correctly re-initializes models if needed)
         model_path = os.path.join(directory_path, 'model.pth')
         target_model_path = os.path.join(directory_path, 'target_model.pth')
         optimizer_path = os.path.join(directory_path, 'optimizer.pth')
         hyperparams_path = os.path.join(directory_path, 'hyperparams.json')
-        dqn_logger.info(f"Attempting to load DQNAgent state for {self.tls_id} from {directory_path}")
+        dqn_logger.info(f"Attempting to load Phase DQNAgent state for {self.tls_id} from {directory_path}")
 
-        # Check if essential files exist
-        required_files = [model_path, target_model_path, optimizer_path, hyperparams_path]
+        required_files = [model_path, target_model_path, hyperparams_path] # Optimizer optional
         if not all(os.path.exists(p) for p in required_files):
-            dqn_logger.warning(f"Cannot load DQNAgent state for {self.tls_id}: Required file(s) not found in {directory_path}")
-            return # Do not attempt partial load
+            dqn_logger.warning(f"Cannot load Phase DQNAgent state: Required file(s) not found in {directory_path}")
+            return
 
         try:
-            # Determine device
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            dqn_logger.info(f"Loading state onto device: {device}")
-
-            # --- Load Models ---
-            # Ensure models are instantiated BEFORE loading state
-            if not hasattr(self, 'model') or not self.model:
-                 dqn_logger.error("Model not initialized before loading state. Cannot proceed.")
-                 return
-            if not hasattr(self, 'target_model') or not self.target_model:
-                 dqn_logger.error("Target model not initialized before loading state. Cannot proceed.")
-                 return
-
-            self.model.load_state_dict(torch.load(model_path, map_location=device))
-            self.target_model.load_state_dict(torch.load(target_model_path, map_location=device))
-            self.model.to(device) # Move model to correct device
-            self.target_model.to(device)
-
-            # --- Load Optimizer ---
-            # Ensure optimizer is initialized BEFORE loading state
-            if not hasattr(self, 'optimizer') or not self.optimizer:
-                 dqn_logger.error("Optimizer not initialized before loading state. Re-initializing.")
-                 # Re-initialize optimizer (requires learning rate from hyperparams or default)
-                 # This assumes self.model.parameters() are now correctly loaded and on the right device
-                 default_lr = 0.001 # Or get from config
-                 self.optimizer = optim.Adam(self.model.parameters(), lr=default_lr)
-                 # Load state into the newly created optimizer
-                 self.optimizer.load_state_dict(torch.load(optimizer_path)) # Now load the state
-            else:
-                 # If optimizer exists, just load the state.
-                 # NOTE: This might cause issues if the model parameters changed device *after*
-                 # the optimizer was initially created but before saving. Re-initializing is often safer.
-                 try:
-                     self.optimizer.load_state_dict(torch.load(optimizer_path))
-                 except Exception as opt_load_err:
-                      dqn_logger.error(f"Failed loading optimizer state dict, re-initializing optimizer: {opt_load_err}")
-                      # Re-initialize as fallback
-                      lr = getattr(self, 'alpha', 0.001) # Try to get loaded alpha if possible
-                      self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-                      self.optimizer.load_state_dict(torch.load(optimizer_path)) # Retry loading state
-
-
-            # --- Load Hyperparameters ---
+            # --- Load Hyperparameters First (to potentially re-init models/optimizer) ---
+            loaded_state_dim = None
+            loaded_action_size = None
+            loaded_alpha = self.alpha # Default to current
             with open(hyperparams_path, 'r') as f:
                 hyperparams = json.load(f)
-                # Use loaded values, falling back to existing values if key is missing in JSON
-                self.epsilon = hyperparams.get('epsilon', getattr(self, 'epsilon', 0.1))
-                self.gamma = hyperparams.get('gamma', getattr(self, 'gamma', 0.95))
-                self.train_step = hyperparams.get('train_step', getattr(self, 'train_step', 0))
-                self.epsilon_decay = hyperparams.get('epsilon_decay', getattr(self, 'epsilon_decay', 0.9999))
-                self.epsilon_min = hyperparams.get('epsilon_min', getattr(self, 'epsilon_min', 0.1))
-                # Reload config-related params if they influence behavior (batch_size, target_update_freq)
-                # Note: Memory size isn't reloaded here as we are not loading the buffer itself,
-                # but the maxlen should match the original configuration.
+                self.epsilon = hyperparams.get('epsilon', self.epsilon)
+                self.gamma = hyperparams.get('gamma', self.gamma)
+                self.train_step = hyperparams.get('train_step', self.train_step)
+                self.epsilon_decay = hyperparams.get('epsilon_decay', self.epsilon_decay)
+                self.epsilon_min = hyperparams.get('epsilon_min', self.epsilon_min)
+                loaded_alpha = hyperparams.get('alpha', self.alpha)
+                loaded_state_dim = hyperparams.get('state_dim')
+                loaded_action_size = hyperparams.get('action_size')
+                # Load other params like batch_size, target_update_freq if they might change
 
-            # Set model modes
-            self.model.train()       # Resume training
-            self.target_model.eval() # Target model stays in eval mode
+            # --- Validate and Potentially Re-initialize Models ---
+            if loaded_state_dim != self.state_dim or loaded_action_size != self.action_size:
+                 dqn_logger.warning(f"Saved model dimensions ({loaded_state_dim}x{loaded_action_size}) mismatch current ({self.state_dim}x{self.action_size}). Re-initializing models.")
+                 self.model = PhaseDQN(self.state_dim, self.action_size).to(self.device)
+                 self.target_model = PhaseDQN(self.state_dim, self.action_size).to(self.device)
+            # Now load state dicts
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            self.target_model.load_state_dict(torch.load(target_model_path, map_location=self.device))
 
-            dqn_logger.info(f"DQNAgent state for {self.tls_id} loaded successfully from {directory_path}")
-
-        except FileNotFoundError:
-            # Should be caught by the check above, but handle defensively
-            dqn_logger.error(f"Error loading DQNAgent state: File not found during load attempt in {directory_path}")
-        except Exception as e:
-            dqn_logger.error(f"Error loading DQNAgent state for {self.tls_id} from {directory_path}: {e}", exc_info=True)
-
-    def remember(self, state, action, reward, next_state, done):
-        """Store experience in replay memory with improved error handling.
-
-        Args:
-            state: Current state dictionary
-            action: Action taken as (link_index, new_state)
-            reward: Reward received
-            next_state: Next state dictionary
-            done: Whether episode is done
-        """
-        if action is None:
-            return  # Skip storing if no action was taken
-            
-        try:    
-            # Preprocess states
-            link_features, signal_state = self._preprocess_state(state)
-            next_link_features, next_signal_state = self._preprocess_state(next_state)
-            
-            # Extract link index and new state
-            link_idx, new_state = action
-            
-            # Find the internal index of the link in our link_states list
-            link_internal_idx = None
-            for i, link in enumerate(state['link_states']):
-                if link['index'] == link_idx:
-                    link_internal_idx = i
-                    break
-                    
-            if link_internal_idx is None:
-                # If the link index isn't found, map to the first link as fallback
-                link_internal_idx = 0
-            
-            # Safety check on link_internal_idx bounds
-            link_internal_idx = min(link_internal_idx, self.max_links - 1)
-                
-            # Find the index of the new state in our link_states list
-            action_idx = self.link_states.index(new_state) if new_state in self.link_states else 0
-            
-            # Store transition in memory
-            self.memory.append((
-                link_features, 
-                signal_state,
-                (link_internal_idx, action_idx),
-                reward, 
-                next_link_features,
-                next_signal_state,
-                done
-            ))
-        except Exception as e:
-            # Log any errors but don't crash
-            print(f"Error remembering experience: {e}")
-
-    def learn(self, state, action, next_state, done):
-        """Learn from experience using deep Q-learning.
-
-        Args:
-            state: Previous state dictionary
-            action: Action that was taken as (link_index, new_state)
-            next_state: Resulting state dictionary
-            done: Whether episode is done
-        """
-        # Skip learning if no action was taken
-        if action is None:
-            return
-            
-        # Calculate reward
-        reward, _ = self.calculate_reward(state, action, next_state)
-
-        # Store experience
-        self.remember(state, action, reward, next_state, done)
-
-        # Only learn if we have enough samples
-        if len(self.memory) < self.batch_size:
-            return
-
-        # Perform experience replay
-        self._replay()
-
-    def _replay(self):
-        """Perform experience replay and network updates with improved tracking."""
-        # Sample random batch from memory
-        minibatch = random.sample(self.memory, self.batch_size)
-
-        # Extract batch components
-        link_features_batch = np.array([t[0] for t in minibatch])
-        signal_state_batch = [t[1] for t in minibatch]
-        actions_batch = [t[2] for t in minibatch]
-        rewards_batch = np.array([t[3] for t in minibatch])
-        next_link_features_batch = np.array([t[4] for t in minibatch])
-        next_signal_state_batch = [t[5] for t in minibatch]
-        dones_batch = np.array([t[6] for t in minibatch])
-        
-        # Convert to tensors
-        link_features_tensor = torch.FloatTensor(link_features_batch)
-        rewards_tensor = torch.FloatTensor(rewards_batch)
-        next_link_features_tensor = torch.FloatTensor(next_link_features_batch)
-        dones_tensor = torch.FloatTensor(dones_batch)
-        
-        # Separate link indices and action indices
-        link_indices = torch.LongTensor([a[0] for a in actions_batch])
-        action_indices = torch.LongTensor([a[1] for a in actions_batch])
-        
-        # Current Q-values
-        link_scores, action_values = self.model(link_features_tensor, signal_state_batch)
-        
-        # Extract Q-values for the selected links and actions
-        # First index by batch, then by link, then by action
-        current_q = torch.zeros(self.batch_size)
-        for i in range(self.batch_size):
-            link_idx = link_indices[i]
-            if link_idx >= action_values.size(1):
-                # Safety check - if link_idx is out of bounds, use index 0
-                link_idx = 0
-            action_idx = action_indices[i]
-            if action_idx >= action_values.size(2):
-                # Safety check - if action_idx is out of bounds, use index 0
-                action_idx = 0
-            current_q[i] = action_values[i, link_idx, action_idx]
-            
-        # Target Q-values
-        with torch.no_grad():
-            # Get scores and values from target network
-            next_link_scores, next_action_values = self.target_model(
-                next_link_features_tensor, next_signal_state_batch
-            )
-            
-            # For each sample, find the best link and the best action for that link
-            target_q = torch.zeros(self.batch_size)
-            for i in range(self.batch_size):
-                # Make sure we're handling tensor dimensions properly
-                if next_link_scores.dim() <= 1 or next_link_scores.size(0) <= i:
-                    # Handle unexpected tensor dimensions by defaulting to 0
-                    best_action_val = 0.0
-                else:
-                    # Get the shape of the current sample's scores
-                    if next_link_scores.dim() == 2:
-                        # 2D tensor [batch_size, num_links]
-                        valid_links = min(next_link_scores.size(1), self.max_links)
-                        if valid_links > 0:
-                            best_link_idx = next_link_scores[i, :valid_links].argmax().item()
-                            
-                            # Find the best action for that link
-                            if best_link_idx < next_action_values.size(1):
-                                best_action_val = next_action_values[i, best_link_idx].max().item()
-                            else:
-                                best_action_val = 0.0
-                        else:
-                            best_action_val = 0.0
-                    else:
-                        # Unexpected tensor dimension, default to 0
-                        best_action_val = 0.0
-                
-                # Calculate target Q-value
-                target_q[i] = rewards_tensor[i] + (1 - dones_tensor[i]) * self.gamma * best_action_val
-                
-        # Compute loss
-        loss = nn.MSELoss()(current_q, target_q)
-        
-        # Update network
-        self.optimizer.zero_grad()
-        try:
-            loss.backward()
-            self.optimizer.step()
-        except RuntimeError as e:
-            # Handle the element does not require grad error in tests
-            if "element 0 of tensors does not require grad" in str(e):
-                print("Warning: Gradient calculation failed, skipping optimizer step")
+            # --- Load Optimizer ---
+            # Re-initialize optimizer with loaded alpha BEFORE loading state dict
+            self.optimizer = optim.Adam(self.model.parameters(), lr=loaded_alpha)
+            if os.path.exists(optimizer_path):
+                self.optimizer.load_state_dict(torch.load(optimizer_path, map_location=self.device))
             else:
-                raise
+                dqn_logger.warning("Optimizer state file not found. Optimizer initialized with loaded alpha.")
 
-        # Update target network if needed
-        self.train_step += 1
-        if self.train_step % self.target_update_freq == 0:
-            self.target_model.load_state_dict(self.model.state_dict())
-            
-        # Update debugging metrics
-        self.debug_stats['avg_reward'] = (self.debug_stats['avg_reward'] * self.debug_count + rewards_tensor.mean().item()) / (self.debug_count + 1)
-        self.debug_stats['avg_loss'] = (self.debug_stats['avg_loss'] * self.debug_count + loss.item()) / (self.debug_count + 1)
-        self.debug_stats['avg_q_value'] = (self.debug_stats['avg_q_value'] * self.debug_count + current_q.mean().item()) / (self.debug_count + 1)
-        self.debug_stats['exploration_rate'] = self.epsilon
-        self.debug_count += 1
-        
-        # Log debug info periodically
-        if self.debug_count % self.debug_interval == 0:
-            dqn_logger.info(f"TLS {self.tls_id} - Training stats: epsilon={self.epsilon:.4f}, avg_reward={self.debug_stats['avg_reward']:.4f}, avg_q={self.debug_stats['avg_q_value']:.4f}, loss={self.debug_stats['avg_loss']:.4f}")
+            self.model.to(self.device)
+            self.target_model.to(self.device)
+            self.target_model.eval()
 
-    def calculate_reward(self, state, action, next_state):
-        """Calculate reward based on state changes and improvements.
-        
-        This improved reward function measures changes between states rather than
-        absolute values, providing clearer feedback about action impacts.
-        
-        Args:
-            state: Previous enhanced state
-            action: Tuple of (link_index, new_state)
-            next_state: Next enhanced state
-            
-        Returns:
-            reward: Calculated reward value
-            components: Dictionary of reward components
-        """
-        if action is None:
-            return 0.0, {}  # No action, no reward
-            
-        link_index, new_state = action
-        
-        # Extract states
-        prev_link_states = state.get('link_states', [])
-        next_link_states = next_state.get('link_states', [])
-        
-        # Find the specific link that was changed in both states
-        prev_target_link = None
-        next_target_link = None
-        
-        for link in prev_link_states:
-            if link.get('index') == link_index:
-                prev_target_link = link
-                break
-                
-        for link in next_link_states:
-            if link.get('index') == link_index:
-                next_target_link = link
-                break
-                
-        if not prev_target_link or not next_target_link:
-            return 0.0, {}  # Link not found
-        
-        # Calculate CHANGES in metrics (improvement-based)
-        # For waiting times and queues, a decrease is an improvement (positive reward)
-        waiting_time_change = prev_target_link.get('waiting_time', 0) - next_target_link.get('waiting_time', 0)
-        queue_length_change = prev_target_link.get('queue_length', 0) - next_target_link.get('queue_length', 0)
-        
-        # Calculate total metrics changes across all links
-        prev_total_waiting = sum(link.get('waiting_time', 0) for link in prev_link_states)
-        next_total_waiting = sum(link.get('waiting_time', 0) for link in next_link_states)
-        total_waiting_change = prev_total_waiting - next_total_waiting
-        
-        # Get throughput change
-        prev_throughput = getattr(self, '_prev_throughput', 0)
-        current_throughput = self.network.get_departed_vehicles_count()
-        throughput_change = current_throughput - prev_throughput
-        self._prev_throughput = current_throughput  # Store for next calculation
-        
-        # Scale factors (adjusted to create stronger signals)
-        WAITING_TIME_SCALE = 0.05   # Per second of waiting time change
-        QUEUE_LENGTH_SCALE = 0.5    # Per vehicle change in queue
-        THROUGHPUT_SCALE = 1.0      # Per vehicle increase in throughput
-        
-        # Calculate reward components with stronger scaling
-        waiting_component = waiting_time_change * WAITING_TIME_SCALE
-        queue_component = queue_length_change * QUEUE_LENGTH_SCALE
-        throughput_component = throughput_change * THROUGHPUT_SCALE
-        
-        # Add action-specific bonus/penalty to provide clearer learning signal
-        action_bonus = 0.0
-        if new_state == 'G' and next_target_link.get('queue_length', 0) > 0:
-            # Significant bonus for turning light green when queue exists
-            action_bonus = 2.0 * min(1.0, next_target_link.get('queue_length', 0) / 5.0)
-        elif new_state == 'r' and next_target_link.get('queue_length', 0) == 0:
-            # Smaller bonus for turning light red when no queue
-            action_bonus = 1.0
-        elif new_state == 'G' and next_target_link.get('queue_length', 0) == 0:
-            # Penalty for turning light green when no queue
-            action_bonus = -0.5
-        
-        # Combine components with higher weight on improvements
-        total_reward = (
-            waiting_component +
-            queue_component +
-            throughput_component + 
-            action_bonus
-        )
-        
-        # Track episode rewards for debugging
-        self.debug_stats['episode_rewards'].append(total_reward)
-        if len(self.debug_stats['episode_rewards']) > 100:
-            self.debug_stats['episode_rewards'].pop(0)
-        
-        # Return reward and components for analysis
-        components = {
-            'waiting_component': waiting_component,
-            'queue_component': queue_component,
-            'throughput_component': throughput_component,
-            'action_bonus': action_bonus
-        }
-        
-        return total_reward, components
+            dqn_logger.info(f"Phase DQNAgent state loaded successfully for {self.tls_id}. Epsilon={self.epsilon:.4f}, TrainStep={self.train_step}")
+
+        except Exception as e:
+            dqn_logger.error(f"Error loading Phase DQNAgent state for {self.tls_id}: {e}", exc_info=True)
