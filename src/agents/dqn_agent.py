@@ -345,8 +345,8 @@ class DQNAgent(Agent):
             max_queue = max(max_queue, link.get('queue_length', 0))
 
         queue_penalty = 0
-        if max_queue > 30: # Penalize if any queue gets very long
-            queue_penalty = - (max_queue - 30) * 0.05
+        if max_queue > 15: # Penalize if any queue gets very long
+            queue_penalty = - (max_queue - 15) * 0.05
 
         total_reward = reward + queue_penalty
 
