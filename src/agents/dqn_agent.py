@@ -8,7 +8,6 @@ import json
 import logging
 from collections import deque
 from typing import Dict, Any, Tuple, Optional, List, Union
-import traci
 
 import torch.nn.functional as F
 
@@ -80,18 +79,16 @@ class DQNAgent(Agent):
 
         # --- Action Space: Phases ---
         try:
-            # Get phase definitions from SUMO logic for this TLS
-            logics = traci.trafficlight.getAllProgramLogics(self.tls_id)
-            if not logics:
+            # Get phase definitions from network interface
+            self.phases = self.network.get_traffic_light_phases(self.tls_id)
+            if not self.phases:
                 raise ValueError(f"No program logics found for TLS '{self.tls_id}'")
-            # Assuming the first logic is the relevant one
-            self.phases = logics[0].phases
             self.num_phases = len(self.phases)
             self.action_size = self.num_phases # Action is selecting a phase index
             dqn_logger.info(f"TLS {self.tls_id} initialized with {self.num_phases} phases.")
         except Exception as e:
              dqn_logger.error(f"Failed to get phases for TLS {self.tls_id}: {e}. Setting num_phases to 4 as fallback.")
-             # Fallback if TraCI fails or no logic defined
+             # Fallback if network interface fails
              self.num_phases = 4 # Common fallback
              self.action_size = 4
              self.phases = None # Indicate phases couldn't be loaded
@@ -145,9 +142,10 @@ class DQNAgent(Agent):
 
         # --- Calculate Current Phase ---
         # We need to know the current phase index to create the one-hot encoding
-        # and calculate time_on_phase. This might require querying SUMO again.
+        # and calculate time_on_phase
         try:
-            current_phase_index = traci.trafficlight.getPhase(self.tls_id)
+            # Use the network interface instead of direct TraCI call
+            current_phase_index = self.network.get_current_phase_index(self.tls_id)
         except Exception as e:
              dqn_logger.warning(f"Could not get current phase index for {self.tls_id}: {e}. Defaulting to 0.")
              current_phase_index = 0 # Fallback

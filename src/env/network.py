@@ -50,6 +50,25 @@ class NetworkInterface:
     def get_lane_queue(self, lane_id: str) -> int:
         """Get queue length for a lane."""
         pass
+        
+    def get_current_phase_index(self, tls_id: str) -> int:
+        """Get the current phase index for a traffic light."""
+        try:
+            return traci.trafficlight.getPhase(tls_id)
+        except Exception as e:
+            self.logger.error(f"Error getting current phase for {tls_id}: {e}")
+            return 0  # Default fallback value
+            
+    def get_traffic_light_phases(self, tls_id: str) -> List[Any]:
+        """Get all phases defined for a traffic light."""
+        try:
+            logics = traci.trafficlight.getAllProgramLogics(tls_id)
+            if not logics:
+                raise ValueError(f"No traffic light programs found for TLS {tls_id}")
+            return logics[0].phases
+        except Exception as e:
+            self.logger.error(f"Error getting traffic light phases for {tls_id}: {e}")
+            return []  # Empty list as fallback
     
     # Deprecated phase-based methods (maintained for backward compatibility)
     def get_phase_duration(self, tls_id: str) -> float:
@@ -500,6 +519,18 @@ class Network(NetworkInterface):
 
         return list(range(len(logics[0].phases)))
 
+    def is_simulation_complete(self) -> bool:
+        """Check if the simulation is complete.
+        
+        Returns:
+            True if no more vehicles are expected, False otherwise
+        """
+        try:
+            return traci.simulation.getMinExpectedNumber() <= 0
+        except Exception as e:
+            self.logger.error(f"Error checking if simulation is complete: {e}")
+            return True  # Assume simulation ended on error
+    
     # Simulation management methods
 
     def start_simulation(self, use_gui: bool = False, port: Optional[int] = None) -> bool:

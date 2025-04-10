@@ -3,7 +3,6 @@
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import logging
-import traci # Make sure traci is imported
 
 from src.utils.observer import Observable
 from src.utils.data_collector import MetricsCalculator
@@ -111,8 +110,8 @@ class Environment(Observable):
         states = {}
         try:
             self.current_time = self.network.get_current_time()
-        except traci.exceptions.TraCIException as e:
-             self.logger.error(f"TraCI error getting current time: {e}. Returning empty state.")
+        except Exception as e:
+             self.logger.error(f"Error getting current time: {e}. Returning empty state.")
              return {} # Cannot proceed if simulation connection is lost
 
         for tls_id in self.network.tls_ids:
@@ -162,14 +161,11 @@ class Environment(Observable):
                     'link_states': link_states_list,
                     'current_signal_state': current_signal_state,
                     # Agents might also need the current phase index
-                    'current_phase_index': traci.trafficlight.getPhase(tls_id) # Add current phase index
+                    'current_phase_index': self.network.get_current_phase_index(tls_id) # Use network interface
                 }
-            except traci.exceptions.TraCIException as e:
-                 self.logger.error(f"TraCI error getting state for TLS {tls_id}: {e}. Skipping this TLS.")
-                 continue # Skip this TLS if TraCI error occurs
             except Exception as e:
-                self.logger.error(f"Unexpected error getting state for TLS {tls_id}: {e}", exc_info=True)
-                continue
+                 self.logger.error(f"Error getting state for TLS {tls_id}: {e}. Skipping this TLS.", exc_info=True)
+                 continue # Skip this TLS if error occurs
 
         self.current_states = states
         return states
@@ -364,8 +360,8 @@ class Environment(Observable):
         self.episode_metrics['rewards'].append(sum(final_rewards.values()))
         try:
             self.episode_metrics['throughput'].append(self.network.get_departed_vehicles_count())
-        except traci.exceptions.TraCIException as e:
-            self.logger.warning(f"TraCI error getting departed vehicles count: {e}")
+        except Exception as e:
+            self.logger.warning(f"Error getting departed vehicles count: {e}")
             self.episode_metrics['throughput'].append(0) # Append default on error
 
 
@@ -391,8 +387,8 @@ class Environment(Observable):
             try:
                  # Get final throughput (arrived vehicles)
                  final_throughput = self.network.get_arrived_vehicles_count()
-            except traci.exceptions.TraCIException as e:
-                 self.logger.error(f"TraCI error getting arrived vehicles count at episode end: {e}")
+            except Exception as e:
+                 self.logger.error(f"Error getting arrived vehicles count at episode end: {e}")
                  final_throughput = -1 # Indicate error
 
             # Prepare episode data for logging/queue
@@ -452,10 +448,10 @@ class Environment(Observable):
             # Check if action is a valid phase index (integer)
             if isinstance(phase_index, int):
                 try:
-                    # Set the phase using TraCI
-                    # SUMO's setPhase command should handle transitions including yellow lights
+                    # Set the phase using network interface
+                    # This should handle transitions including yellow lights
                     # based on the phase definitions in the .net.xml file.
-                    traci.trafficlight.setPhase(tls_id, phase_index)
+                    self.network.set_traffic_light_phase(tls_id, phase_index)
                     applied_actions_count += 1
                     # self.logger.debug(f"Applied phase {phase_index} to TLS {tls_id}")
 
@@ -495,26 +491,17 @@ class Environment(Observable):
                     self.network.simulation_step()
                     # Update current time after each simulation step
                     self.current_time = self.network.get_current_time()
-                except traci.exceptions.FatalTraCIError as e:
-                     self.logger.critical(f"Environment: Fatal TraCI error during simulation step: {e}. Simulation likely disconnected.", exc_info=True)
-                     # Potentially raise an exception or signal termination upstream
-                     raise # Re-raise fatal error
-                except traci.exceptions.TraCIException as e:
-                    self.logger.error(f"Environment: TraCI error during simulation step: {e}")
-                    # Decide how to handle simulation errors (e.g., break, log and continue?)
-                    break # Stop stepping if simulation has issues
                 except Exception as e:
-                    self.logger.error(f"Environment: Unexpected error during simulation step: {e}", exc_info=True)
-                    break
+                     self.logger.critical(f"Environment: Error during simulation step: {e}. Simulation likely disconnected.", exc_info=True)
+                     # Stop stepping if simulation has issues
+                     break
 
         # Update network state (like arrived vehicles) after stepping
         try:
             # self.network.update_edge_data() # May not be needed if get_state reads fresh metrics
             self.network.update_arrivals()
-        except traci.exceptions.TraCIException as e:
-             self.logger.error(f"Environment: TraCI error during post-step update: {e}")
         except Exception as e:
-            self.logger.error(f"Environment: Unexpected error during post-step update: {e}", exc_info=True)
+            self.logger.error(f"Environment: Error during post-step update: {e}", exc_info=True)
 
 
     def is_terminal_state(self) -> bool:
@@ -523,15 +510,8 @@ class Environment(Observable):
         Returns:
             True if the simulation is complete, False otherwise
         """
-        try:
-             # Check if the number of vehicles expected to finish is zero or less
-             return traci.simulation.getMinExpectedNumber() <= 0
-        except traci.exceptions.TraCIException as e:
-            self.logger.error(f"TraCI error checking terminal state: {e}. Assuming simulation ended.")
-            return True # Assume ended if connection lost
-        except Exception as e:
-             self.logger.error(f"Unexpected error checking terminal state: {e}. Assuming simulation ended.", exc_info=True)
-             return True
+        # Use the network interface to check terminal state
+        return self.network.is_simulation_complete()
 
 
     # --- Deprecated Method ---
