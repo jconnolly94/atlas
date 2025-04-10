@@ -337,8 +337,26 @@ class DQNAgent(Agent):
         next_total_wait = sum(link.get('waiting_time', 0) for link in next_link_states)
 
         # Reward is the reduction in waiting time
-        reward = (prev_total_wait - next_total_wait) / 10.0 # Scale down reward
+        wait_reward = (prev_total_wait - next_total_wait) / 10.0 # Scale down reward
 
+        # Calculate intersection-specific throughput
+        # Count vehicles that have passed through the intersection
+        prev_vehicle_count = sum(link.get('vehicle_count', 0) for link in prev_link_states)
+        next_vehicle_count = sum(link.get('vehicle_count', 0) for link in next_link_states)
+        
+        # Count vehicles that have passed through this intersection
+        # If vehicle count decreases, it means vehicles have exited the links controlled by this TLS
+        passed_vehicles = max(0, prev_vehicle_count - next_vehicle_count)
+        
+        # If we have link exit counts directly, use those instead
+        prev_exit_count = sum(link.get('exit_count', 0) for link in prev_link_states)
+        next_exit_count = sum(link.get('exit_count', 0) for link in next_link_states)
+        if next_exit_count > prev_exit_count:
+            passed_vehicles = next_exit_count - prev_exit_count
+        
+        # Reward for intersection throughput
+        throughput_reward = passed_vehicles * 0.2  # Scale for appropriate impact
+        
         # Small penalty for very long queues to discourage gridlock
         max_queue = 0
         for link in next_link_states:
@@ -348,11 +366,14 @@ class DQNAgent(Agent):
         if max_queue > 15: # Penalize if any queue gets very long
             queue_penalty = - (max_queue - 15) * 0.05
 
-        total_reward = reward + queue_penalty
+        # Combine rewards
+        total_reward = wait_reward + throughput_reward + queue_penalty
 
         components = {
-            'wait_time_reduction': reward,
-            'queue_penalty': queue_penalty
+            'wait_time_reduction': wait_reward,
+            'throughput_reward': throughput_reward,
+            'queue_penalty': queue_penalty,
+            'passed_vehicles': passed_vehicles
         }
 
         return total_reward, components
