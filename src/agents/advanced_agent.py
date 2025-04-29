@@ -243,7 +243,7 @@ class AdvancedAgent(Agent):
         "priority_beta": 0.4      # Keep importance sampling exponent for PER
     }
 
-    def __init__(self, tls_id, network, conflict_detector=None, alpha=0.001, gamma=0.95, epsilon=1.0,
+    def __init__(self, tls_id, network, alpha=0.001, gamma=0.95, epsilon=1.0,
                  epsilon_decay=0.999, epsilon_min=0.05, batch_size=64,
                  memory_size=20000, target_update_freq=100, double_dqn=True,
                  prioritized_replay=True, priority_alpha=0.6, priority_beta=0.4):
@@ -251,7 +251,6 @@ class AdvancedAgent(Agent):
         Args:
             tls_id: Traffic light system ID
             network: Network interface
-            conflict_detector: (Optional, not used in phase-based control)
             alpha: Learning rate
             gamma: Discount factor
             epsilon: Initial exploration rate
@@ -267,7 +266,6 @@ class AdvancedAgent(Agent):
         """
         super().__init__(tls_id, network)
         self.network = network
-        # conflict_detector not needed for phase-based control
         
         # --- Initialize Phase Information (from DQN) ---
         try:

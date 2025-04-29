@@ -19,17 +19,23 @@ def data_writer_process(data_queue: multiprocessing.Queue, run_id: str, base_dir
     run_path = os.path.join(base_dir, run_id)
     data_path = os.path.join(run_path, 'data')
     os.makedirs(data_path, exist_ok=True)
-
-    step_file = os.path.join(data_path, 'step_data.parquet')
+    
+    # Create a steps directory to store episode-specific step data
+    steps_dir = os.path.join(data_path, 'steps')
+    os.makedirs(steps_dir, exist_ok=True)
+    
+    # Episode data file remains the same
     episode_file = os.path.join(data_path, 'episode_data.parquet')
 
-    step_writer = None
+    # Dictionary to hold writers for each episode
+    step_writers = {}
+    step_schemas = {}
     episode_writer = None
-    step_schema = None
     episode_schema = None
 
     buffer_size = 1000  # Write every N records
-    step_buffer = []
+    # Dictionary to hold step buffers for each episode
+    step_buffers = {}
     episode_buffer = []
 
     logger.info(f"DataWriter started for run {run_id}. Writing to {data_path}")
@@ -45,12 +51,33 @@ def data_writer_process(data_queue: multiprocessing.Queue, run_id: str, base_dir
                     break # Exit the loop
 
                 record_type = record.pop('record_type', None) # Get and remove the type marker
+                # In runner.py the key is 'type', not 'record_type'
+                if record_type is None:
+                    record_type = record.pop('type', None)
 
                 if record_type == 'step':
-                    step_buffer.append(record)
-                    if len(step_buffer) >= buffer_size:
-                        step_writer, step_schema = write_batch(step_buffer, step_file, step_writer, step_schema)
-                        step_buffer.clear()
+                    # Get the episode number from the record
+                    episode_num = record.get('episode', 0)
+                    
+                    # Initialize buffer for this episode if it doesn't exist
+                    if episode_num not in step_buffers:
+                        step_buffers[episode_num] = []
+                    
+                    # Add record to the appropriate episode buffer
+                    step_buffers[episode_num].append(record)
+                    
+                    # Check if buffer needs flushing
+                    if len(step_buffers[episode_num]) >= buffer_size:
+                        # Construct episode-specific file path
+                        step_file = os.path.join(steps_dir, f'step_data_episode_{episode_num}.parquet')
+                        step_writers[episode_num], step_schemas[episode_num] = write_batch(
+                            step_buffers[episode_num], 
+                            step_file, 
+                            step_writers.get(episode_num), 
+                            step_schemas.get(episode_num)
+                        )
+                        step_buffers[episode_num].clear()
+                        
                 elif record_type == 'episode':
                     episode_buffer.append(record)
                     if len(episode_buffer) >= buffer_size:
@@ -61,9 +88,17 @@ def data_writer_process(data_queue: multiprocessing.Queue, run_id: str, base_dir
 
             except Empty:
                 # Timeout occurred, check if buffers need flushing
-                if step_buffer:
-                    step_writer, step_schema = write_batch(step_buffer, step_file, step_writer, step_schema)
-                    step_buffer.clear()
+                for episode_num, buffer in step_buffers.items():
+                    if buffer:
+                        step_file = os.path.join(steps_dir, f'step_data_episode_{episode_num}.parquet')
+                        step_writers[episode_num], step_schemas[episode_num] = write_batch(
+                            buffer, 
+                            step_file, 
+                            step_writers.get(episode_num), 
+                            step_schemas.get(episode_num)
+                        )
+                        buffer.clear()
+                        
                 if episode_buffer:
                     episode_writer, episode_schema = write_batch(episode_buffer, episode_file, episode_writer, episode_schema)
                     episode_buffer.clear()
@@ -71,19 +106,29 @@ def data_writer_process(data_queue: multiprocessing.Queue, run_id: str, base_dir
                 continue
 
         # Final flush after receiving sentinel
-        if step_buffer:
-            write_batch(step_buffer, step_file, step_writer, step_schema)
+        for episode_num, buffer in step_buffers.items():
+            if buffer:
+                step_file = os.path.join(steps_dir, f'step_data_episode_{episode_num}.parquet')
+                write_batch(buffer, step_file, step_writers.get(episode_num), step_schemas.get(episode_num))
+                
         if episode_buffer:
             write_batch(episode_buffer, episode_file, episode_writer, episode_schema)
 
     except Exception as e:
         logger.error(f"Error in DataWriter process: {e}", exc_info=True)
     finally:
-        # Ensure writers are closed
-        if step_writer:
-            step_writer.close()
+        # Ensure all writers are closed
+        for episode_num, writer in step_writers.items():
+            if writer:
+                try:
+                    writer.close()
+                    logger.info(f"Closed step writer for episode {episode_num}")
+                except Exception as close_err:
+                    logger.error(f"Error closing step writer for episode {episode_num}: {close_err}")
+        
         if episode_writer:
             episode_writer.close()
+        
         logger.info("DataWriter process finished.")
 
 def write_batch(buffer: list, file_path: str, writer, schema):

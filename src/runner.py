@@ -28,159 +28,7 @@ logger = logging.getLogger('Runner')
 # Ensure logger is configured (assuming basicConfig is called elsewhere)
 logger = logging.getLogger('DataWriter')
 
-def data_writer_process(queue, step_file_path, episode_file_path):
-    """
-    Process that reads data dictionaries from a shared queue and writes them to Parquet files.
-
-    Args:
-        queue: A multiprocessing Queue for receiving data dictionaries.
-        step_file_path: Path where step data will be saved as Parquet.
-        episode_file_path: Path where episode data will be saved as Parquet.
-    """
-
-    # Define schemas matching the data sent by worker_process
-    # Make sure these fields EXACTLY match the keys in the dicts put onto the queue
-    step_schema = pa.schema([
-        pa.field('agent_type', pa.string()),
-        pa.field('network', pa.string()),
-        pa.field('episode', pa.int64()),
-        pa.field('step', pa.int64()),
-        pa.field('tls_id', pa.string()),
-        pa.field('action', pa.string()),      # Received as string
-        pa.field('reward', pa.float64()),
-        pa.field('waiting_time', pa.float64()),
-        pa.field('vehicle_count', pa.int64()), # Added based on worker data
-        pa.field('queue_length', pa.int64())   # Added based on worker data
-        # Add any other fields sent by the worker for step data
-    ])
-
-    episode_schema = pa.schema([
-        pa.field('agent_type', pa.string()),
-        pa.field('network', pa.string()),
-        pa.field('episode', pa.int64()),
-        pa.field('avg_waiting', pa.float64()),
-        pa.field('total_reward', pa.float64()),
-        pa.field('total_steps', pa.int64()),      # Added based on worker data
-        pa.field('final_throughput', pa.int64()), # Added based on worker data
-        pa.field('termination_reason', pa.string()) # Added for early episode termination tracking
-        # Add any other fields sent by the worker for episode data
-    ])
-
-    # Ensure output directories exist
-    try:
-        os.makedirs(os.path.dirname(step_file_path), exist_ok=True)
-        os.makedirs(os.path.dirname(episode_file_path), exist_ok=True)
-    except OSError as e:
-        logger.error(f"Failed to create directories for Parquet files: {e}")
-        return # Cannot proceed if directories can't be created
-
-    step_writer = None
-    episode_writer = None
-    items_processed = 0
-    error_count = 0
-
-    try:
-        # Initialize Parquet writers
-        step_writer = pq.ParquetWriter(step_file_path, step_schema)
-        episode_writer = pq.ParquetWriter(episode_file_path, episode_schema)
-        logger.info(f"Parquet writers opened for steps: {step_file_path}, episodes: {episode_file_path}")
-
-        # Main processing loop
-        while True:
-            try:
-                # Get next item from queue. Use timeout to prevent potential deadlocks
-                # if the sentinel is missed or producers die unexpectedly.
-                item = queue.get(timeout=5) # Wait up to 5 seconds
-
-            except Empty:
-                # Queue was empty for the timeout duration. Check if producers might still be running.
-                # This part requires more sophisticated logic if you want graceful shutdown
-                # based on producer status. For now, we just continue waiting.
-                logger.debug("Queue empty, continuing to wait...")
-                continue
-            except (EOFError, BrokenPipeError) as e:
-                 logger.error(f"Queue connection error: {e}. Shutting down writer.")
-                 break # Exit loop if queue connection breaks
-            except Exception as e:
-                logger.error(f"Unexpected error getting from queue: {e}. Shutting down writer.")
-                break # Exit loop on other queue errors
-
-
-            # Check for sentinel value to terminate
-            if item is None:
-                logger.info("Received sentinel (None). Shutting down writer.")
-                break
-
-            # Validate item structure
-            if not isinstance(item, dict):
-                logger.warning(f"Received non-dict item, skipping: {type(item)}")
-                error_count += 1
-                continue
-
-            item_type = item.pop('type', None) # Get type and remove it from dict
-            if item_type not in ['step', 'episode']:
-                logger.warning(f"Received item with invalid or missing 'type', skipping: {item_type}")
-                error_count += 1
-                continue
-
-            # Select appropriate writer and schema
-            writer = None
-            schema = None
-            if item_type == 'step':
-                writer = step_writer
-                schema = step_schema
-            elif item_type == 'episode':
-                writer = episode_writer
-                schema = episode_schema
-
-            try:
-                # Ensure all columns expected by the schema exist in the item, add None if missing.
-                # This prevents errors in from_pandas if a worker sends incomplete data.
-                record = {}
-                for field in schema:
-                    record[field.name] = item.get(field.name, None) # Use .get() for safety
-
-                # Convert the single record dictionary to a DataFrame
-                df = pd.DataFrame([record])
-
-                # Convert DataFrame to PyArrow Table, explicitly using the schema
-                table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
-
-                # Write the table to the Parquet file
-                writer.write_table(table)
-                items_processed += 1
-
-            except pa.ArrowInvalid as arrow_err:
-                 logger.error(f"Schema mismatch or data conversion error for {item_type}: {arrow_err}. Item: {record}")
-                 error_count += 1
-            except Exception as write_err:
-                logger.error(f"Error writing {item_type} data to Parquet: {write_err}. Item: {record}")
-                error_count += 1
-                time.sleep(0.1)
-
-    except Exception as setup_err:
-         logger.error(f"Error during data writer setup or main loop: {setup_err}")
-         traceback.print_exc()
-    finally:
-        # Cleanly close writers
-        closed_count = 0
-        try:
-            if step_writer:
-                step_writer.close()
-                closed_count += 1
-                logger.info("Step data Parquet writer closed.")
-        except Exception as e:
-            logger.error(f"Error closing step writer: {e}")
-
-        try:
-            if episode_writer:
-                episode_writer.close()
-                closed_count += 1
-                logger.info("Episode data Parquet writer closed.")
-        except Exception as e:
-            logger.error(f"Error closing episode writer: {e}")
-
-        logger.info(f"Data writer process finished. Processed items: {items_processed}, Errors: {error_count}, Writers closed: {closed_count}")
+# The data_writer_process function is now imported from utils.data_writer
 
 
 class Runner:
@@ -199,8 +47,6 @@ class Runner:
             "Q-Learning",  # Using lane-level control by default
             "DQN",         # Using lane-level control by default
             "Advanced",
-            "Revised",  # New agent type
-            "Enhanced",
             "Baseline"
         ]
         self.run_manager = RunManager()  # Add this line
@@ -467,18 +313,17 @@ class Runner:
 
             # --- Update Data File Paths ---
             run_path = self.run_manager.get_run_path(run_id)
-            data_dir = os.path.join(run_path, 'data')
-            os.makedirs(data_dir, exist_ok=True) # Ensure data subdir exists
-            step_file_path = os.path.join(data_dir, 'step_data.parquet')
-            episode_file_path = os.path.join(data_dir, 'episode_data.parquet')
-
+            
             # Create shared data queue
             data_queue = manager.Queue()
 
-            # Create and start writer process
+            # Import data_writer from utils module
+            from utils.data_writer import data_writer_process, TERMINATION_SENTINEL
+            
+            # Create and start writer process with the run_id
             writer_proc = Process(
-                target=data_writer_process,  # Assume this function is defined elsewhere
-                args=(data_queue, step_file_path, episode_file_path)
+                target=data_writer_process,
+                args=(data_queue, run_id)
             )
             writer_proc.start()
 
@@ -524,7 +369,7 @@ class Runner:
                 p.join()
 
             # Signal writer shutdown with sentinel value
-            data_queue.put(None)
+            data_queue.put(TERMINATION_SENTINEL)
 
             # Join writer process
             writer_proc.join()
@@ -830,7 +675,6 @@ class Runner:
                     # Import components here to avoid serialization issues
                     from env.network import Network
                     from env.environment import Environment
-                    from utils.data_collector import MetricsCalculator
                     from agents.agent_factory import agent_factory
 
                     # Create network and start simulation
@@ -842,15 +686,6 @@ class Runner:
                         raise Exception("Failed to start SUMO")
 
                     worker_logger.info(f"Successfully connected to SUMO on port {port}")
-
-                    # Instantiate ConflictDetector
-                    try:
-                        from src.utils.conflict_detector import ConflictDetector
-                        conflict_detector = ConflictDetector(network.sumo_config_file)
-                        worker_logger.info(f"Successfully initialized ConflictDetector for network: {network_name}")
-                    except Exception as detector_err:
-                        worker_logger.error(f"Failed to initialize ConflictDetector: {detector_err}", exc_info=True)
-                        raise RuntimeError(f"Critical error: Failed to initialize ConflictDetector: {detector_err}")
 
                     break
                 except Exception as e:
@@ -872,7 +707,7 @@ class Runner:
             from agents.agent_factory import agent_factory # Import locally
             agents = {}
             for tls_id in tls_ids:
-                agent = agent_factory.create_agent(agent_type, tls_id, network, conflict_detector=conflict_detector)
+                agent = agent_factory.create_agent(agent_type, tls_id, network)
                 if resume_flag:
                     agent_state_path = run_manager.get_agent_state_path(run_id, tls_id, agent_type)
                     worker_logger.info(f"Attempting to load state for agent {agent_type} ({tls_id}) from {agent_state_path}")

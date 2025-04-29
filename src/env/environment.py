@@ -7,7 +7,6 @@ import logging
 from src.utils.observer import Observable
 from src.utils.data_collector import MetricsCalculator
 
-
 class Environment(Observable):
     """Environment that manages the traffic simulation, supporting phase-based actions."""
 
@@ -96,8 +95,6 @@ class Environment(Observable):
         # Ensure network is properly updated after reset
         # self.network.update_edge_data() # May not be needed if get_state reads fresh
         self.network.update_arrivals()
-        self.logger.info(f"Environment reset complete. Initial time: {self.current_time}")
-
         return self.current_states
 
     def get_state(self) -> Dict[str, Any]:
@@ -254,12 +251,21 @@ class Environment(Observable):
             queue_threshold = early_term_config.get('max_step_queue_length', 40)
 
             if max_wait > wait_threshold:
-                early_termination_reason = f"Max wait time exceeded ({max_wait:.1f}s > {wait_threshold:.1f}s)"
+                # Create detailed message for logging
+                detailed_reason = f"Max wait time exceeded ({max_wait:.1f}s > {wait_threshold:.1f}s)"
+                # Use standardized category string for data storage
+                early_termination_reason = "max_wait_time_exceeded"
+                # Log the detailed message
+                self.logger.warning(f"Early termination at episode {self.episode_number}, step {self.episode_step}: {detailed_reason}")
             elif max_queue > queue_threshold:
-                early_termination_reason = f"Max queue length exceeded ({max_queue} > {queue_threshold})"
+                # Create detailed message for logging
+                detailed_reason = f"Max queue length exceeded ({max_queue} > {queue_threshold})"
+                # Use standardized category string for data storage
+                early_termination_reason = "max_queue_length_exceeded"
+                # Log the detailed message
+                self.logger.warning(f"Early termination at episode {self.episode_number}, step {self.episode_step}: {detailed_reason}")
 
             if early_termination_reason:
-                self.logger.warning(f"Early termination at episode {self.episode_number}, step {self.episode_step}: {early_termination_reason}")
                 done = True
                 self.last_termination_reason = early_termination_reason
 
@@ -472,13 +478,10 @@ class Environment(Observable):
                     #         # Simplistic: update time for all links on phase change
                     #         self.last_change_time[tls_id][i] = self.network.get_current_time()
 
-
-                except traci.exceptions.TraCIException as e:
-                    self.logger.warning(f"Environment: Could not set phase {phase_index} for TLS {tls_id}: {e}")
                 except KeyError:
                      self.logger.error(f"Environment: Invalid TLS ID '{tls_id}' provided in actions.")
                 except Exception as e: # Catch other potential errors
-                    self.logger.error(f"Environment: Unexpected error setting phase for TLS {tls_id}: {e}", exc_info=True)
+                    self.logger.warning(f"Environment: Could not set phase {phase_index} for TLS {tls_id}: {e}")
             else:
                 # Handle unexpected action format
                  self.logger.warning(f"Environment: Received unexpected action format for TLS {tls_id}: {phase_index}. Expected phase index (int).")
@@ -520,3 +523,4 @@ class Environment(Observable):
     #     """Get the time since the last state change for a specific link."""
     #     # ... (Implementation removed as it's less relevant for phase control) ...
     #     pass
+
