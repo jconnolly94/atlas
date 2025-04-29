@@ -1,5 +1,5 @@
 # agents/agent_factory.py
-from typing import Dict, Any, Type, Callable
+from typing import Dict, Any, Type, Callable, List, Optional
 
 from .agent import Agent
 from .q_agent import QAgent
@@ -16,39 +16,22 @@ class AgentFactory:
         self.agent_types = {
             "Q-Learning": QAgent,
             "DQN": DQNAgent,
-            "Advanced": AdvancedAgent,
+            "Advanced": AdvancedAgent, 
             "Baseline": NoAgent
         }
-
-        # Default configurations for different agent types
-        self.default_configs = {
+        
+        # Default configurations for specific agent types
+        self.agent_configs = {
             "Q-Learning": {
-                "alpha": 0.1,
-                "gamma": 0.9,
-                "epsilon": 0.1,
-                "state_bin_size": 5
+                "epsilon": 0.8,              # High exploration rate
+                "epsilon_decay": 0.998,      # Slower decay for more exploration
+                "min_epsilon": 0.15         # Higher minimum exploration
             },
             "DQN": {
-                "alpha": 0.001,
-                "gamma": 0.95,
-                "epsilon": 0.1,
-                "epsilon_decay": 0.995,
-                "epsilon_min": 0.01,
-                "batch_size": 32,
-                "memory_size": 10000,
-                "target_update_freq": 100
-            },
-            "Advanced": {
-                "alpha": 0.001,
-                "gamma": 0.95,
-                "epsilon": 0.1,
-                "epsilon_decay": 0.995,
-                "epsilon_min": 0.01,
-                "batch_size": 32,
-                "memory_size": 10000,
-                "target_update_freq": 100
-            },
-            "Baseline": {}
+                "epsilon": 0.9,              # Very high exploration rate
+                "epsilon_decay": 0.9999,     # Very slow decay for exploration
+                "epsilon_min": 0.2           # Higher minimum for exploration
+            }
         }
 
     def create_agent(self, agent_type: str, tls_id: str, network, **kwargs) -> Agent:
@@ -69,40 +52,20 @@ class AgentFactory:
         if agent_type not in self.agent_types:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
-        # Get agent class and default config
+        # Get agent class
         agent_class = self.agent_types[agent_type]
-        config = self.default_configs[agent_type].copy()
-
-        # Override defaults with provided kwargs
-        config.update(kwargs)
-
-        # For the advanced agent, we need to provide additional parameters
-        # related to its action space
-        if agent_type == "Advanced":
-            # Get possible phases for this traffic light
-            possible_phases = network.get_possible_phases(tls_id)
-
-            # Default duration options (in seconds)
-            duration_options = [5, 10, 15, 20]
-
-            # State size based on environment
-            state_size = 6  # Default size based on state features
-
-            # Create agent with combined parameters
-            agent = agent_class(
-                possible_phases=possible_phases,
-                duration_options=duration_options,
-                state_size=state_size,
-                **config
-            )
-
-            # Special handling: set traffic light association
-            agent.set_traffic_light(tls_id, network)
-
-            return agent
-
-        # For other agents, just create with standard parameters
-        return agent_class(tls_id, network, **config)
+        
+        # Apply default configuration if available
+        config = kwargs.copy()
+        if agent_type in self.agent_configs:
+            # Start with default configs
+            default_config = self.agent_configs[agent_type].copy()
+            # Override defaults with any provided kwargs
+            default_config.update(config)
+            config = default_config
+        
+        # Initialize the agent
+        return agent_class.create(tls_id, network, **config)
 
     def create_agents_for_network(self, agent_type: str, network) -> Dict[str, Agent]:
         """Create agents for all traffic lights in a network.
@@ -126,7 +89,7 @@ class AgentFactory:
 agent_factory = AgentFactory()
 
 
-# Helper functions for backward compatibility
+# Helper functions for agent creation
 def create_q_agent(tls_id, network, **kwargs):
     return agent_factory.create_agent("Q-Learning", tls_id, network, **kwargs)
 

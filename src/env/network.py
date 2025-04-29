@@ -2,7 +2,9 @@ import numpy as np
 import traci
 import networkx as nx
 import os
-from typing import List, Dict, Any, Tuple, Optional
+import warnings
+import logging
+from typing import List, Dict, Any, Tuple, Optional, Set
 
 from src.utils.network_exporter import NetworkExporter
 
@@ -10,10 +12,20 @@ from src.utils.network_exporter import NetworkExporter
 class NetworkInterface:
     """Interface for interacting with the traffic network."""
 
-    def get_state(self, tls_id: str) -> np.ndarray:
-        """Get the state vector for a traffic light."""
+    # Phase-based control methods (current approach)
+    def get_current_phase_index(self, tls_id: str) -> int:
+        """Get the current phase index for a traffic light."""
         pass
 
+    def get_traffic_light_phases(self, tls_id: str) -> List[Any]:
+        """Get all phases defined for a traffic light."""
+        pass
+
+    def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
+        """Set phase for a traffic light."""
+        pass
+
+    # Lane metrics (still needed for state representation)
     def get_controlled_lanes(self, tls_id: str) -> List[str]:
         """Get lanes controlled by a traffic light."""
         pass
@@ -30,20 +42,13 @@ class NetworkInterface:
         """Get queue length for a lane."""
         pass
 
-    def get_phase_duration(self, tls_id: str) -> float:
-        """Get phase duration for a traffic light."""
+    # Additional methods needed for state representation
+    def get_red_yellow_green_state(self, tls_id: str) -> str:
+        """Get the current signal state string (still used for state representation)."""
         pass
 
-    def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
-        """Set phase for a traffic light."""
-        pass
-
-    def set_phase_duration(self, tls_id: str, duration: float) -> None:
-        """Set phase duration for a traffic light."""
-        pass
-
-    def get_current_phase(self, tls_id: str) -> int:
-        """Get the current phase of a traffic light."""
+    def get_link_metrics(self, tls_id: str) -> List[Dict[str, Any]]:
+        """Get performance metrics for each link controlled by a traffic light."""
         pass
 
 
@@ -51,7 +56,7 @@ class Network(NetworkInterface):
     """Implementation of the network interface using SUMO and TraCI."""
 
     def __init__(self, sumo_config_file: str, simulation_steps_per_action: int = 5):
-        """Initialize the network.
+        """Initialize the network with phase-based control configuration.
 
         Args:
             sumo_config_file: Path to SUMO configuration file
@@ -59,99 +64,34 @@ class Network(NetworkInterface):
         """
         self.sumo_config_file = sumo_config_file
         self.simulation_steps_per_action = simulation_steps_per_action
-        self.graph = nx.DiGraph()
+        self.graph = nx.DiGraph()  # For visualization only
         self.arrived_so_far = 0
         self.tls_ids = []
         self.port = None
-        self.previous_waiting_times = {}  # Track previous waiting times
 
         # Extract network name from config file path
-        self.network_name = os.path.basename(os.path.dirname(sumo_config_file))
+        self.network_name = os.path.splitext(os.path.basename(sumo_config_file))[0]
 
         # Flag to track if network data has been exported
         self.network_exported = False
 
-    def build_from_sumo(self) -> None:
-        """Build the graph from SUMO's current network."""
-        self.graph.clear()
+        # Initialize logger
+        self.logger = logging.getLogger(f"Network_{id(self)}")  # Or just "Network"
+        self.logger.setLevel(logging.INFO)  # Or desired level
+        # Add handlers if needed, or rely on root logger config
+        if not self.logger.hasHandlers():
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
 
-        # Add junctions as nodes
-        for junction_id in traci.junction.getIDList():
-            self.graph.add_node(junction_id, type='junction')
+    # REMOVED THE FOLLOWING LANE-LEVEL CONTROL METHODS:
+    # - set_red_yellow_green_state
+    # - change_specific_link
+    # - check_physical_conflicts
+    # - _simple_conflict_check
 
-        # Add edges
-        for edge_id in traci.edge.getIDList():
-            num_lanes = traci.edge.getLaneNumber(edge_id)
-            from_node = traci.edge.getFromJunction(edge_id)
-            to_node = traci.edge.getToJunction(edge_id)
-
-            for lane_index in range(num_lanes):
-                lane_id = f"{edge_id}_{lane_index}"
-                self.graph.add_edge(from_node, to_node, id=lane_id, waiting_time=0)
-
-        # Initialize previous waiting times
-        self.previous_waiting_times = {
-            data['id']: 0 for _, _, data in self.graph.edges(data=True)
-        }
-
-        # Export network data for visualization
-        if not self.network_exported:
-            self.export_network_data()
-            self.network_exported = True
-
-    def export_network_data(self) -> None:
-        """Export network data for visualization."""
-        NetworkExporter.export_network_data(self, self.network_name)
-
-    def update_edge_data(self) -> None:
-        """Update edge waiting times from TraCI."""
-        for _, _, data in self.graph.edges(data=True):
-            lane_id = data['id']
-            data['waiting_time'] = self.get_lane_waiting_time(lane_id)
-
-    def get_total_waiting_time(self) -> float:
-        """Get total waiting time across all lanes."""
-        return sum(data['waiting_time'] for _, _, data in self.graph.edges(data=True))
-
-    def get_step_waiting_time(self) -> float:
-        """Get step-wise waiting time change."""
-        current_waiting = {}
-
-        for _, _, data in self.graph.edges(data=True):
-            lane_id = data['id']
-            current_waiting[lane_id] = data['waiting_time']
-
-        # Calculate change
-        step_waiting = sum(current_waiting.values()) - sum(self.previous_waiting_times.values())
-
-        # Update previous values
-        self.previous_waiting_times = current_waiting.copy()
-
-        return max(0, step_waiting)  # Prevent negative values
-
-    def get_state(self) -> Dict[str, np.ndarray]:
-        """Get state vectors for all traffic lights."""
-        states = {}
-
-        for tls_id in self.tls_ids:
-            lanes = self.get_controlled_lanes(tls_id)
-
-            state_features = {
-                'waiting_time': sum(self.get_lane_waiting_time(lane) for lane in lanes),
-                'vehicle_count': sum(self.get_lane_vehicle_count(lane) for lane in lanes),
-                'queue_length': sum(self.get_lane_queue(lane) for lane in lanes),
-                'throughput': sum(self.get_lane_vehicle_count(lane) for lane in lanes),
-                'current_phase_duration': self.get_phase_duration(tls_id),
-                'time_since_last_switch': (
-                        traci.trafficlight.getNextSwitch(tls_id) - traci.simulation.getTime()
-                )
-            }
-
-            states[tls_id] = np.array(list(state_features.values()))
-
-        return states
-
-    # Implementation of interface methods
+    # Lane metrics implementation - RETAINED for state representation
 
     def get_controlled_lanes(self, tls_id: str) -> List[str]:
         """Get lanes controlled by a traffic light."""
@@ -169,20 +109,76 @@ class Network(NetworkInterface):
         """Get queue length for a lane."""
         return traci.lane.getLastStepHaltingNumber(lane_id)
 
-    def get_phase_duration(self, tls_id: str) -> float:
-        """Get phase duration for a traffic light."""
-        return traci.trafficlight.getPhaseDuration(tls_id)
+    # Required methods for state representation
+    def get_controlled_links(self, tls_id: str) -> List[List[Tuple[str, str, str]]]:
+        """Get links controlled by a traffic light with mapping to lanes.
 
-    def set_traffic_light_phase(self, tls_id: str, phase: int) -> None:
-        """Set phase for a traffic light."""
-        traci.trafficlight.setPhase(tls_id, phase)
+        Args:
+            tls_id: ID of the traffic light
 
-    def set_phase_duration(self, tls_id: str, duration: float) -> None:
-        """Set phase duration for a traffic light."""
-        traci.trafficlight.setPhaseDuration(tls_id, duration)
+        Returns:
+            List of links, where each link is a tuple of (fromLane, toLane, internalLane)
+        """
+        try:
+            return traci.trafficlight.getControlledLinks(tls_id)
+        except traci.exceptions.TraCIException as e:
+            self.logger.warning(f"Could not get controlled links for {tls_id}: {e}")
+            return []
 
-    def get_current_phase(self, tls_id: str) -> int:
-        """Get the current phase of a traffic light.
+    def get_red_yellow_green_state(self, tls_id: str) -> str:
+        """Get the current signal state string.
+
+        Args:
+            tls_id: ID of the traffic light
+
+        Returns:
+            Current signal state string (e.g., "GrGr")
+        """
+        try:
+            return traci.trafficlight.getRedYellowGreenState(tls_id)
+        except traci.exceptions.TraCIException as e:
+            self.logger.warning(f"Could not get RYG state for {tls_id}: {e}")
+            return ""
+
+    def get_link_metrics(self, tls_id: str) -> List[Dict[str, Any]]:
+        """Get performance metrics for each link controlled by a traffic light.
+
+        Args:
+            tls_id: ID of the traffic light
+
+        Returns:
+            List of dictionaries with metrics for each link
+        """
+        links = self.get_controlled_links(tls_id)
+        if not links:  # Empty list indicates error
+            self.logger.warning(f"Cannot get link metrics - no links for {tls_id}")
+            return []
+
+        link_metrics = []
+
+        for i, link_group in enumerate(links):
+            if not link_group:  # Skip empty links
+                continue
+
+            try:
+                link = link_group[0]  # Take the first link in the group
+                from_lane = link[0]
+
+                link_metrics.append({
+                    'index': i,
+                    'from_lane': from_lane,
+                    'waiting_time': self.get_lane_waiting_time(from_lane),
+                    'vehicle_count': self.get_lane_vehicle_count(from_lane),
+                    'queue_length': self.get_lane_queue(from_lane)
+                })
+            except Exception as e:
+                self.logger.warning(f"Error getting metrics for link {i} of {tls_id}: {e}")
+
+        return link_metrics
+
+    # Core phase-based control methods
+    def get_current_phase_index(self, tls_id: str) -> int:
+        """Get the current phase index for a traffic light.
 
         Args:
             tls_id: ID of the traffic light
@@ -192,20 +188,73 @@ class Network(NetworkInterface):
         """
         try:
             return traci.trafficlight.getPhase(tls_id)
-        except traci.exceptions.TraCIException as e:
-            print(f"Warning: Could not get current phase for {tls_id}: {e}")
-            return 0
+        except Exception as e:
+            self.logger.error(f"Error getting current phase for {tls_id}: {e}")
+            return 0  # Default fallback value
 
-    def get_possible_phases(self, tls_id: str) -> List[int]:
-        """Get possible phases for a traffic light."""
-        logics = traci.trafficlight.getAllProgramLogics(tls_id)
+    def get_traffic_light_phases(self, tls_id: str) -> List[Any]:
+        """Get all phases defined for a traffic light.
 
-        if not logics:
-            raise RuntimeError(f"No program logics found for traffic light '{tls_id}'")
+        Args:
+            tls_id: ID of the traffic light
 
-        return list(range(len(logics[0].phases)))
+        Returns:
+            List of phase objects
+        """
+        try:
+            logics = traci.trafficlight.getAllProgramLogics(tls_id)
+            if not logics:
+                raise ValueError(f"No traffic light programs found for TLS {tls_id}")
+            return logics[0].phases
+        except Exception as e:
+            self.logger.error(f"Error getting traffic light phases for {tls_id}: {e}")
+            return []  # Empty list as fallback
+
+    def set_traffic_light_phase(self, tls_id: str, phase: int) -> bool:
+        """Set phase for a traffic light.
+
+        Args:
+            tls_id: ID of the traffic light
+            phase: Phase index
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            traci.trafficlight.setPhase(tls_id, phase)
+            return True
+        except Exception as e:
+            self.logger.error(f"Network: Could not set phase {phase} for TLS {tls_id}: {e}")
+            return False
 
     # Simulation management methods
+    def build_from_sumo(self) -> None:
+        """Build the graph from SUMO's current network (for visualization)."""
+        self.graph.clear()
+
+        # Add junctions as nodes
+        for junction_id in traci.junction.getIDList():
+            self.graph.add_node(junction_id, type='junction')
+
+        # Add edges
+        for edge_id in traci.edge.getIDList():
+            num_lanes = traci.edge.getLaneNumber(edge_id)
+            from_node = traci.edge.getFromJunction(edge_id)
+            to_node = traci.edge.getToJunction(edge_id)
+
+            # Add only lanes that actually exist in the SUMO network
+            for lane_index in range(num_lanes):
+                lane_id = f"{edge_id}_{lane_index}"
+                self.graph.add_edge(from_node, to_node, id=lane_id, waiting_time=0)
+
+        # Export network data for visualization if not already done
+        if not self.network_exported:
+            try:
+                export_result = NetworkExporter.export_network_data(self, self.network_name)
+                self.network_exported = True
+                self.logger.info(f"Exported network visualization data for {self.network_name}")
+            except Exception as e:
+                self.logger.warning(f"Network export failed: {e}")
 
     def start_simulation(self, use_gui: bool = False, port: Optional[int] = None) -> bool:
         """Start the SUMO simulation.
@@ -236,14 +285,15 @@ class Network(NetworkInterface):
         ]
 
         try:
-            print(f"Starting SUMO on port {port} with command: {' '.join(cmd)}")
+            self.logger.info(f"Starting SUMO on port {port} with command: {' '.join(cmd)}")
             traci.start(cmd, port=port, stdout=logfile)
             self.build_from_sumo()
             self.tls_ids = traci.trafficlight.getIDList()
-            print(f"Simulation started on port {self.port}. Detected TLS IDs: {self.tls_ids}")
+
+            self.logger.info(f"Simulation started on port {self.port}. Detected TLS IDs: {self.tls_ids}")
             return True
         except Exception as e:
-            print(f"Error starting SUMO on port {port}: {e}")
+            self.logger.error(f"Error starting SUMO on port {port}: {e}")
             return False
 
     def simulation_step(self) -> None:
@@ -265,17 +315,22 @@ class Network(NetworkInterface):
 
         # Reset counters
         self.arrived_so_far = 0
-        self.previous_waiting_times = {
-            data['id']: 0 for _, _, data in self.graph.edges(data=True)
-        }
 
     def close(self) -> None:
         """Close the simulation."""
         traci.close()
 
     def is_simulation_complete(self) -> bool:
-        """Check if the simulation is complete."""
-        return traci.simulation.getMinExpectedNumber() <= 0
+        """Check if the simulation is complete.
+
+        Returns:
+            True if no more vehicles are expected, False otherwise
+        """
+        try:
+            return traci.simulation.getMinExpectedNumber() <= 0
+        except Exception as e:
+            self.logger.error(f"Error checking if simulation is complete: {e}")
+            return True  # Assume simulation ended on error
 
     def update_arrivals(self) -> None:
         """Update count of arrived vehicles."""
@@ -293,7 +348,3 @@ class Network(NetworkInterface):
     def get_current_time(self) -> float:
         """Get current simulation time."""
         return traci.simulation.getTime()
-
-    def get_phase_description(self, tls_id: str) -> str:
-        """Get phase description for a traffic light."""
-        return traci.trafficlight.getRedYellowGreenState(tls_id)

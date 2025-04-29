@@ -4,34 +4,21 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="9bbb6c2b-2f56-4233-a05a-ca2d51b0371d" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/atlas.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/analysis/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/analysis/dashboard.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/networks/DublinRd/DublinRd.sumocfg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/networks/Simple4wayCross/simpleCross.net.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/networks/Simple4wayCross/simpleCross.netecfg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/networks/Simple4wayCross/simpleCross.rou.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/networks/Simple4wayCross/simpleCross.sumocfg" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/advanced_agent.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/agent.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/agent_factory.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/dqn_agent.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/no_agent.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/agents/q_agent.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/env/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/env/environment.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/env/network.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/runner.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/utils/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/utils/data_collector.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/utils/network_exporter.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/utils/observer.py" afterDir="false" />
+    <list default="true" id="9bbb6c2b-2f56-4233-a05a-ca2d51b0371d" name="Changes" comment="Further improvements to GUI to remove unneeded step counts. Also removed 'Simulation closed' print statements as these no longer needed.">
+      <change afterPath="$PROJECT_DIR$/src/agents/enhanced_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/analysis/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/integration/__init__.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/analysis/dashboard.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/advanced_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/advanced_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/agent_factory.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/agent_factory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/dqn_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/dqn_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/no_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/no_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/agents/q_agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/agents/q_agent.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/env/network.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/env/network.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/runner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/utils/data_collector.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/utils/data_collector.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/utils/network_exporter.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/utils/network_exporter.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -46,11 +33,28 @@
     </option>
   </component>
   <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="batched_learning" />
+      </map>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 6
-}]]></component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;jconnolly94&quot;
+  }
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/jconnolly94/atlas.git&quot;,
+    &quot;accountId&quot;: &quot;a9ff16dc-5cc3-4f38-86bf-c8ec7306f8e0&quot;
+  }
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 6
+}</component>
   <component name="ProjectId" id="2tgmsK927qVjHavuUchITO7j4dg" />
   <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
   <component name="ProjectViewState">
@@ -59,13 +63,19 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "Python.agent_factory.executor": "Run",
     "Python.dashboard.executor": "Run",
+    "Python.datavis.executor": "Run",
+    "Python.geographic_callbacks.executor": "Run",
+    "Python.network.executor": "Run",
     "Python.network_visualisation.executor": "Run",
+    "Python.run_integration_tests.executor": "Run",
+    "Python.run_tests.executor": "Run",
     "Python.runner.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "git-widget-placeholder": "main",
-    "last_opened_file_path": "/Users/jconnolly/atlas/analysis",
+    "last_opened_file_path": "/Users/jconnolly/atlas/traffic_dashboard/data",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
@@ -76,13 +86,16 @@
 }]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/traffic_dashboard/data" />
+      <recent name="$PROJECT_DIR$/traffic_dashboard/data/datastore" />
       <recent name="$PROJECT_DIR$/analysis" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/src/data" />
+      <recent name="$PROJECT_DIR$/traffic_dashboard" />
       <recent name="$PROJECT_DIR$/src" />
       <recent name="$PROJECT_DIR$/networks/DublinRd" />
       <recent name="$PROJECT_DIR$/networks/Simple4wayCross" />
-      <recent name="$PROJECT_DIR$/data/datastore" />
     </key>
   </component>
   <component name="SharedIndexes">
@@ -101,16 +114,75 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1740782297061</updated>
-      <workItem from="1740782298156" duration="5356000" />
+      <workItem from="1740782298156" duration="28073000" />
+      <workItem from="1740938184301" duration="2408000" />
+      <workItem from="1740940608034" duration="16457000" />
+      <workItem from="1741085174424" duration="198000" />
+      <workItem from="1741085380454" duration="7279000" />
     </task>
+    <task id="LOCAL-00001" summary="initial commit">
+      <option name="closed" value="true" />
+      <created>1740787935040</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1740787935040</updated>
+    </task>
+    <task id="LOCAL-00002" summary="Improved graph representation on dashboard.py">
+      <option name="closed" value="true" />
+      <created>1740790666405</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1740790666405</updated>
+    </task>
+    <task id="LOCAL-00003" summary="Resolved issue where reaching max time prevented observation of episode level metrics">
+      <option name="closed" value="true" />
+      <created>1740921369951</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1740921369951</updated>
+    </task>
+    <task id="LOCAL-00004" summary="Improved loading bar for more granular progress tracking">
+      <option name="closed" value="true" />
+      <created>1740922632605</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1740922632605</updated>
+    </task>
+    <task id="LOCAL-00005" summary="Further improvements to GUI to remove unneeded step counts. Also removed 'Simulation closed' print statements as these no longer needed.">
+      <option name="closed" value="true" />
+      <created>1740923423463</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1740923423463</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="initial commit" />
+    <MESSAGE value="Improved graph representation on dashboard.py" />
+    <MESSAGE value="Resolved issue where reaching max time prevented observation of episode level metrics" />
+    <MESSAGE value="Improved loading bar for more granular progress tracking" />
+    <MESSAGE value="Further improvements to GUI to remove unneeded step counts. Also removed 'Simulation closed' print statements as these no longer needed." />
+    <option name="LAST_COMMIT_MESSAGE" value="Further improvements to GUI to remove unneeded step counts. Also removed 'Simulation closed' print statements as these no longer needed." />
+  </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/atlas$run_tests.coverage" NAME="run_tests Coverage Results" MODIFIED="1741094570999" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/tests" />
     <SUITE FILE_PATH="coverage/atlas$network_visualisation.coverage" NAME="network_visualisation Coverage Results" MODIFIED="1740786117362" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/analysis" />
-    <SUITE FILE_PATH="coverage/atlas$dashboard.coverage" NAME="dashboard Coverage Results" MODIFIED="1740787299370" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/analysis" />
-    <SUITE FILE_PATH="coverage/atlas$runner.coverage" NAME="runner Coverage Results" MODIFIED="1740785450214" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src" />
+    <SUITE FILE_PATH="coverage/atlas$agent_factory.coverage" NAME="agent_factory Coverage Results" MODIFIED="1740796389622" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/agents" />
+    <SUITE FILE_PATH="coverage/atlas$dashboard.coverage" NAME="dashboard Coverage Results" MODIFIED="1740925781273" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/analysis" />
+    <SUITE FILE_PATH="coverage/atlas$datavis.coverage" NAME="datavis Coverage Results" MODIFIED="1740921396784" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/analysis" />
+    <SUITE FILE_PATH="coverage/atlas$runner.coverage" NAME="runner Coverage Results" MODIFIED="1740943070346" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src" />
+    <SUITE FILE_PATH="coverage/atlas$network.coverage" NAME="network Coverage Results" MODIFIED="1740940492689" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/env" />
+    <SUITE FILE_PATH="coverage/atlas$geographic_callbacks.coverage" NAME="geographic_callbacks Coverage Results" MODIFIED="1740933171669" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/dashboard/callbacks" />
+    <SUITE FILE_PATH="coverage/atlas$run_integration_tests.coverage" NAME="run_integration_tests Coverage Results" MODIFIED="1741095773930" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/tests" />
   </component>
 </project>
