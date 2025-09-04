@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 import pandas as pd
 from typing import Dict, Any, Optional
 from utils.run_manager import RunManager
+from utils.worker_utils import setup_worker_logging, start_sumo_network
 from queue import Empty  # For data_writer_process error handling
 
 # Configure logging
@@ -603,38 +604,9 @@ class Runner:
             progress_dict: Dictionary for tracking this agent's progress
             data_queue: Shared queue for data collection
         """
-        # Generate worker ID with PID for uniqueness
         worker_id = f"{agent_type}_{os.getpid()}"
-        # --- Define log file path within the standard logs directory ---
-        log_dir = "data/datastore/logs"
-        os.makedirs(log_dir, exist_ok=True) # Ensure the base log directory exists
-        log_file_path = os.path.join(log_dir, f"worker_{worker_id}.log")
-
-        # --- Robust Logging Configuration for this Worker Process ---
-        worker_logger = logging.getLogger(worker_id) # Get a logger specific to this worker
-        worker_logger.setLevel(logging.INFO) # Set desired level
-
-        # Prevent inheriting handlers from the root logger (important in multiprocessing)
-        worker_logger.propagate = False
-
-        # Remove existing handlers (if any were somehow added, e.g., from basicConfig in main process)
-        for handler in worker_logger.handlers[:]:
-            handler.close()
-            worker_logger.removeHandler(handler)
-
-        # Create a file handler specific to this worker's log file
-        file_handler = logging.FileHandler(log_file_path, mode='w') # Use 'w' to overwrite each time worker starts
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-
-        # Add the handler to this worker's logger
-        worker_logger.addHandler(file_handler)
-
-
-        # --- Use worker_logger for all subsequent logging within this method ---
-        # Replace all `logger.` calls with `worker_logger.`
+        worker_logger, file_handler = setup_worker_logging(worker_id)
         worker_logger.info(f"Worker {worker_id} starting (port range: {port_range}) for run '{run_id}'")
-        worker_logger.info(f"Logging configured to file: {log_file_path}")
 
         # --- Instantiate RunManager ---
         from utils.run_manager import RunManager # Import locally in process
@@ -643,58 +615,11 @@ class Runner:
         save_interval = 5 # Save every 5 episodes
 
         try:
-
-            # Logging setup moved above the try block
-
             # --- Extract Config ---
             network_config_tuple = config['network_config']
             network_name, config_path = network_config_tuple
-            network = None
-            port = None
 
-            # Try multiple ports with a large delay between attempts
-            max_retries = 5
-
-            for attempt in range(max_retries):
-                try:
-                    # Close any existing connection
-                    try:
-                        import traci
-                        traci.close()
-                    except:
-                        pass
-
-                    # Wait a substantial time to ensure ports are free
-                    time.sleep(5)
-
-                    # Get random port
-                    port = random.randint(port_range[0], port_range[1])
-                    worker_logger.info(f"Attempt {attempt + 1}/{max_retries}: Trying port {port}")
-
-
-                    # Import components here to avoid serialization issues
-                    from env.network import Network
-                    from env.environment import Environment
-                    from agents.agent_factory import agent_factory
-
-                    # Create network and start simulation
-                    network = Network(config_path, simulation_steps_per_action=5)
-                    success = network.start_simulation(use_gui=use_gui, port=port)
-
-                    if not success:
-                        worker_logger.error(f"Failed to start SUMO on port {port}")
-                        raise Exception("Failed to start SUMO")
-
-                    worker_logger.info(f"Successfully connected to SUMO on port {port}")
-
-                    break
-                except Exception as e:
-                    worker_logger.error(f"Port {port} connection failed: {str(e)}")
-                    traceback.print_exc()
-                    time.sleep(5)  # Wait longer before next attempt
-
-            if network is None:
-                raise Exception(f"Failed to start SUMO after {max_retries} attempts")
+            network, port = start_sumo_network(config_path, port_range, use_gui, worker_logger)
 
             # Create environment with data_queue
             env = Environment(network, data_queue)

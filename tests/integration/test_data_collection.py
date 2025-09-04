@@ -5,7 +5,6 @@ import os
 import tempfile
 import shutil
 
-from src.utils.data_collector import DataCollector
 from src.env.environment import Environment
 from src.env.network import Network
 
