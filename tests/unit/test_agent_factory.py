@@ -5,7 +5,6 @@ from src.agents.agent import Agent
 from src.agents.q_agent import QAgent
 from src.agents.dqn_agent import DQNAgent
 from src.agents.advanced_agent import AdvancedAgent
-
 from src.agents.no_agent import NoAgent
 
 
@@ -23,7 +22,6 @@ class TestAgentFactory(unittest.TestCase):
         self.assertEqual(self.factory.agent_types["Q-Learning"], QAgent)
         self.assertEqual(self.factory.agent_types["DQN"], DQNAgent)
         self.assertEqual(self.factory.agent_types["Advanced"], AdvancedAgent)
-        
         self.assertEqual(self.factory.agent_types["Baseline"], NoAgent)
 
     @patch('src.agents.q_agent.QAgent.create')
@@ -68,7 +66,6 @@ class TestAgentFactory(unittest.TestCase):
         mock_create.assert_called_once_with("tls1", self.mock_network)
         self.assertEqual(agent, mock_agent)
 
-    
 
     def test_create_unknown_agent(self):
         """Test creating an unknown agent type."""
@@ -123,7 +120,6 @@ class TestAgentFactory(unittest.TestCase):
         mock_create_agent.assert_called_with("Advanced", "tls1", self.mock_network)
         
         
-        
         baseline = no_agent("tls1", self.mock_network)
         mock_create_agent.assert_called_with("Baseline", "tls1", self.mock_network)
         
@@ -131,7 +127,6 @@ class TestAgentFactory(unittest.TestCase):
         self.assertEqual(q_agent, mock_agent)
         self.assertEqual(dqn_agent, mock_agent)
         self.assertEqual(adv_agent, mock_agent)
-        
         self.assertEqual(baseline, mock_agent)
         
         # Verify create_agent was called the correct number of times

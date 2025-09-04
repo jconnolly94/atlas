@@ -5,6 +5,7 @@ import numpy as np
 import os
 import tempfile
 import shutil
+from src.utils.data_collector import DataCollector, NullDataCollector, MetricsCalculator
 
 
 class TestDataCollector(unittest.TestCase):

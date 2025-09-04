@@ -620,7 +620,6 @@ class Runner:
             network_name, config_path = network_config_tuple
 
             network, port = start_sumo_network(config_path, port_range, use_gui, worker_logger)
-
             # Create environment with data_queue
             env = Environment(network, data_queue)
 
